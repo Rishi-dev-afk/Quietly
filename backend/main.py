@@ -9,7 +9,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./neurotwin.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
@@ -53,7 +53,8 @@ app = FastAPI(title="NeuroTwin API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://bookish-halibut-x59jw447wvjwhpqvq-3000.app.github.dev/"],
+    allow_origin_regex=r"https://.*\.app\.github\.dev",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,8 +63,8 @@ app.add_middleware(
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
-    display_name: str
+    password: str = Field(min_length=8)
+    display_name: str = Field(min_length=1, max_length=255)
 
 
 class LoginRequest(BaseModel):

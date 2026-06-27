@@ -106,6 +106,7 @@ export default function HomePage() {
   const [user, setUser] = useState(null);
   const [entries, setEntries] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [authMessage, setAuthMessage] = useState('');
 
   useEffect(() => {
@@ -121,6 +122,19 @@ export default function HomePage() {
     }
   }, []);
 
+  const showToast = (message, duration = 2200) => {
+    setActionLabel(message);
+    window.setTimeout(() => setActionLabel(''), duration);
+  };
+
+  const clearAuth = () => {
+    setToken('');
+    setUser(null);
+    setEntries([]);
+    window.localStorage.removeItem('neurotwin-token');
+    window.localStorage.removeItem('neurotwin-user');
+  };
+
   useEffect(() => {
     if (!token) return;
     const loadEntries = async () => {
@@ -129,11 +143,16 @@ export default function HomePage() {
         const response = await fetch(`${API_BASE_URL}/api/journal/entries`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (response.status === 401) {
+          clearAuth();
+          showToast('Your session expired — please sign in again');
+          return;
+        }
         if (!response.ok) throw new Error('Unable to load entries');
         const data = await response.json();
         setEntries(data.entries.map(mapEntryToViewModel));
       } catch (error) {
-        setActionLabel('Unable to load entries');
+        showToast('Unable to load entries');
       } finally {
         setIsLoading(false);
       }
@@ -186,10 +205,9 @@ export default function HomePage() {
     setPromptIndex((current) => (current + 1) % PROMPTS.length);
   };
 
-  const handleSave = async () => {
+  const submitEntry = async (entryStatus) => {
     if (!token) {
-      setActionLabel('Please sign in first');
-      window.setTimeout(() => setActionLabel(''), 1600);
+      showToast('Please sign in first');
       return;
     }
 
@@ -200,88 +218,87 @@ export default function HomePage() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ content: editorValue, mood, status: 'draft' }),
+        body: JSON.stringify({ content: editorValue, mood, status: entryStatus }),
       });
-      if (!response.ok) throw new Error('Unable to save entry');
-      setActionLabel('Draft saved');
-      window.setTimeout(() => setActionLabel(''), 1600);
+      if (response.status === 401) {
+        clearAuth();
+        showToast('Your session expired — please sign in again');
+        return;
+      }
+      if (!response.ok) throw new Error();
       const data = await response.json();
       setEntries((current) => [mapEntryToViewModel(data), ...current]);
       setEditorValue('');
+      showToast(entryStatus === 'closed' ? "Today's entry closed" : 'Draft saved');
     } catch (error) {
-      setActionLabel('Unable to save entry');
-      window.setTimeout(() => setActionLabel(''), 1600);
+      showToast(entryStatus === 'closed' ? 'Unable to close entry' : 'Unable to save entry');
     }
   };
 
-  const handleClose = async () => {
+  const handleSave = () => submitEntry('draft');
+
+  const handleClose = () => {
     if (!editorValue.trim()) {
-      setActionLabel('Write something first');
-      window.setTimeout(() => setActionLabel(''), 1600);
+      showToast('Write something first');
       return;
     }
-
-    if (!token) {
-      setActionLabel('Please sign in first');
-      window.setTimeout(() => setActionLabel(''), 1600);
-      return;
-    }
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/journal/entries`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ content: editorValue, mood, status: 'closed' }),
-      });
-      if (!response.ok) throw new Error('Unable to close entry');
-      setActionLabel("Today's entry closed");
-      window.setTimeout(() => setActionLabel(''), 1600);
-      const data = await response.json();
-      setEntries((current) => [mapEntryToViewModel(data), ...current]);
-      setEditorValue('');
-    } catch (error) {
-      setActionLabel('Unable to close entry');
-      window.setTimeout(() => setActionLabel(''), 1600);
-    }
+    submitEntry('closed');
   };
 
   const handleAuth = async (event) => {
     event.preventDefault();
+    if (!email.trim() || !password.trim()) {
+      setAuthMessage('Email and password are required');
+      return;
+    }
+    if (authMode === 'register' && password.length < 8) {
+      setAuthMessage('Password must be at least 8 characters');
+      return;
+    }
+
+    setIsAuthSubmitting(true);
+    setAuthMessage('');
     try {
       const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
-      const body = authMode === 'login' ? { email, password } : { email, password, display_name: displayName || email.split('@')[0] };
+      const body = authMode === 'login' ? { email, password } : { email, password, display_name: displayName.trim() || email.split('@')[0] };
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Authentication failed');
+      if (!response.ok) {
+        const detail = Array.isArray(data.detail)
+          ? data.detail.map((item) => item.msg).join(' ')
+          : data.detail;
+        throw new Error(detail || 'Authentication failed');
+      }
+
       if (authMode === 'login') {
-        setToken(data.access_token);
-        window.localStorage.setItem('neurotwin-token', data.access_token);
         const meResponse = await fetch(`${API_BASE_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${data.access_token}` } });
+        if (!meResponse.ok) throw new Error('Signed in, but could not load your profile');
         const profile = await meResponse.json();
+        setToken(data.access_token);
         setUser(profile);
+        window.localStorage.setItem('neurotwin-token', data.access_token);
         window.localStorage.setItem('neurotwin-user', JSON.stringify(profile));
+        setPassword('');
+        showToast(`Welcome back, ${profile.display_name}`);
       } else {
         setAuthMode('login');
+        setPassword('');
         setAuthMessage('Account created. Please sign in.');
       }
     } catch (error) {
       setAuthMessage(error.message || 'Authentication failed');
+    } finally {
+      setIsAuthSubmitting(false);
     }
   };
 
   const handleLogout = () => {
-    setToken('');
-    setUser(null);
-    setEntries([]);
-    window.localStorage.removeItem('neurotwin-token');
-    window.localStorage.removeItem('neurotwin-user');
+    clearAuth();
+    showToast('Signed out');
   };
 
   return (
@@ -357,14 +374,68 @@ export default function HomePage() {
         <section className="editor-wrap">
           {!token ? (
             <form className="auth-card" onSubmit={handleAuth}>
-              <h3>{authMode === 'login' ? 'Sign in to save entries' : 'Create an account'}</h3>
-              {authMessage ? <p className="entry-meta">{authMessage}</p> : null}
-              {authMode === 'register' ? <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Display name" /> : null}
-              <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email" />
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" />
-              <div className="editor-actions">
-                <button className="ghost-btn" type="button" onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Create account' : 'Back to sign in'}</button>
-                <button className="solid-btn" type="submit">{authMode === 'login' ? 'Sign in' : 'Register'}</button>
+              <div className="auth-card-head">
+                <h3>{authMode === 'login' ? 'Sign in to save entries' : 'Create an account'}</h3>
+                <p className="auth-card-sub">
+                  {authMode === 'login'
+                    ? 'Your entries stay private to your account.'
+                    : 'Takes a few seconds — no email confirmation needed.'}
+                </p>
+              </div>
+              {authMessage ? (
+                <p className={`auth-message ${authMessage.startsWith('Account created') ? 'is-success' : 'is-error'}`} role="status">
+                  {authMessage}
+                </p>
+              ) : null}
+              {authMode === 'register' ? (
+                <label className="auth-field">
+                  <span>Display name</span>
+                  <input
+                    value={displayName}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    placeholder="What should we call you?"
+                    autoComplete="name"
+                  />
+                </label>
+              ) : null}
+              <label className="auth-field">
+                <span>Email</span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <label className="auth-field">
+                <span>Password</span>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder={authMode === 'register' ? 'At least 8 characters' : 'Your password'}
+                  autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                  minLength={authMode === 'register' ? 8 : undefined}
+                  required
+                />
+              </label>
+              <div className="editor-actions auth-card-actions">
+                <button
+                  className="ghost-btn"
+                  type="button"
+                  onClick={() => {
+                    setAuthMode(authMode === 'login' ? 'register' : 'login');
+                    setAuthMessage('');
+                  }}
+                  disabled={isAuthSubmitting}
+                >
+                  {authMode === 'login' ? 'Create account' : 'Back to sign in'}
+                </button>
+                <button className="solid-btn" type="submit" disabled={isAuthSubmitting}>
+                  {isAuthSubmitting ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Register'}
+                </button>
               </div>
             </form>
           ) : null}
@@ -379,6 +450,12 @@ export default function HomePage() {
           </div>
         </section>
 
+        {actionLabel ? (
+          <div className="toast" role="status" aria-live="polite">
+            {actionLabel}
+          </div>
+        ) : null}
+
         <section className="thread-section" aria-label="Your last 14 entries">
           <div className="thread-head">
             <span className="thread-title">Your last 14 days, as a thread</span>
@@ -386,6 +463,7 @@ export default function HomePage() {
           </div>
           <div className="thread" id="threadSvgHolder"><ThreadSVG entries={entries.slice(-14)} height={100} amp={26} bg="#FFFFFF" /></div>
         </section>
+
       </main>
 
       <main className={`page ${activeView === 'entries' ? '' : 'is-hidden'}`} id="view-entries">
