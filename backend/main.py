@@ -66,6 +66,45 @@ professional support — but you can gently encourage them to seek it if somethi
 to a crisis line or trusted person right now.
 """
 
+PSYCH_PROFILE_SYSTEM_PROMPT = """You are a careful, non-judgmental psychological analyst reading someone's private journal entries and conversations.
+Your task is to produce a structured psychological profile using the Big Five personality dimensions and several clinical-style observational lenses.
+This is for personal self-reflection only — NOT a clinical diagnosis. Return ONLY a valid JSON object (no markdown, no explanation) with this structure:
+
+{
+  "big_five": {
+    "openness":           { "score": 0-100, "label": "e.g. High", "summary": "1-2 sentences grounded in their writing" },
+    "conscientiousness":  { "score": 0-100, "label": "e.g. Moderate", "summary": "..." },
+    "extraversion":       { "score": 0-100, "label": "e.g. Low", "summary": "..." },
+    "agreeableness":      { "score": 0-100, "label": "e.g. High", "summary": "..." },
+    "neuroticism":        { "score": 0-100, "label": "e.g. Moderate-High", "summary": "..." }
+  },
+  "clinical_observations": [
+    {
+      "domain": "short domain name (e.g. Affect Regulation, Rumination, Self-Criticism, Interpersonal Patterns, Stress Response, Cognitive Style, Self-Concept, Avoidance Tendencies)",
+      "finding": "1-2 sentences describing what you observe — specific, grounded in their words, non-diagnosing",
+      "signal": "low | moderate | elevated | high"
+    }
+  ],
+  "core_tensions": [
+    "A brief phrase naming a central inner conflict visible in the writing (e.g. 'Wanting connection vs. fear of being seen')"
+  ],
+  "strengths": [
+    "A brief phrase naming a genuine psychological strength visible in the writing"
+  ],
+  "overall_narrative": "3-4 sentences synthesising the psychological picture — honest, warm, specific to this person, not generic. Acknowledge what is unclear given limited data."
+}
+
+Guidelines:
+- Big Five scores: be calibrated and specific — avoid clustering everything near 50. Use the full range honestly.
+- clinical_observations: include 5-8 domains. Only include what is actually visible in the writing; don't fill in blanks with assumptions.
+- signal levels: 'low' = minimal evidence, 'moderate' = present but manageable, 'elevated' = notable pattern, 'high' = frequent/intense pattern.
+- core_tensions: 2-4 items max. Name real tensions you see, not textbook ones.
+- strengths: 2-5 items. Be specific — 'ability to articulate ambivalence' is more useful than 'self-aware'.
+- overall_narrative: write this as if to the person directly — honest but not clinical, warm but not sycophantic.
+- If data is sparse, say so explicitly in the narrative and reduce confidence on scores.
+- NEVER diagnose. NEVER name specific mental health conditions or disorders. Observe, describe, reflect.
+"""
+
 MENTAL_MODEL_SYSTEM_PROMPT = """You are an introspective analyst reading someone's private journal entries and conversations.
 Your task is to build a JSON representation of their inner mental landscape — a map of the emotional and \
 cognitive patterns that emerge across their writing and conversations.
@@ -264,6 +303,19 @@ class MentalModelResponse(BaseModel):
     nodes: list[dict]
     edges: list[dict]
     summary: str
+    model: str
+
+
+class PsychProfileRequest(BaseModel):
+    model: str | None = None
+
+
+class PsychProfileResponse(BaseModel):
+    big_five: dict
+    clinical_observations: list[dict]
+    core_tensions: list[str]
+    strengths: list[str]
+    overall_narrative: str
     model: str
 
 
@@ -591,3 +643,84 @@ async def build_mental_model(payload: MentalModelRequest, current_user: CurrentU
         raise HTTPException(status_code=502, detail="Could not parse mental model from AI response") from exc
 
     return MentalModelResponse(nodes=nodes, edges=edges, summary=summary, model=actual_model)
+
+
+# AI — Psychological Profile
+
+@app.post("/api/ai/psych-profile", response_model=PsychProfileResponse)
+async def build_psych_profile(payload: PsychProfileRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+    entries = (
+        db.query(JournalEntry)
+        .filter(JournalEntry.user_id == current_user.id)
+        .order_by(JournalEntry.created_at.desc())
+        .limit(30)
+        .all()
+    )
+
+    chat_messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == current_user.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(100)
+        .all()
+    )
+
+    if not entries and not chat_messages:
+        raise HTTPException(status_code=400, detail="No journal entries or conversations yet — write a few entries or have a conversation first.")
+
+    content_parts = []
+
+    for entry in entries:
+        date_str = entry.created_at.strftime("%b %d")
+        mood_label = {1: "Heavy", 2: "Low", 3: "Steady", 4: "Lighter", 5: "Open"}.get(entry.mood, "Steady")
+        truncated = entry.content[:600] + ("…" if len(entry.content) > 600 else "")
+        content_parts.append(f"[Journal, {date_str}, mood: {mood_label}]\n{truncated}")
+
+    if chat_messages:
+        sessions: dict[str, list] = {}
+        for msg in reversed(chat_messages):
+            if msg.session_id not in sessions:
+                sessions[msg.session_id] = []
+            sessions[msg.session_id].append(msg)
+
+        for session_id, msgs in list(sessions.items())[:10]:
+            date_str = msgs[0].created_at.strftime("%b %d")
+            lines = [f"[Chat, {date_str}]"]
+            for msg in msgs:
+                prefix = "You" if msg.role == "user" else "Quietly"
+                truncated = msg.content[:300] + ("…" if len(msg.content) > 300 else "")
+                lines.append(f"{prefix}: {truncated}")
+            content_parts.append("\n".join(lines))
+
+    digest = "\n\n---\n\n".join(content_parts)
+    user_message = f"Here is my recent journal content and conversations:\n\n{digest}"
+
+    model = payload.model or OPENROUTER_DEFAULT_MODEL
+    messages = [
+        {"role": "system", "content": PSYCH_PROFILE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+
+    reply, actual_model = await call_openrouter(messages, model, timeout=90)
+
+    try:
+        clean = re.sub(r"```(?:json)?|```", "", reply).strip()
+        data = json.loads(clean)
+        big_five = data.get("big_five", {})
+        clinical_observations = data.get("clinical_observations", [])
+        core_tensions = data.get("core_tensions", [])
+        strengths = data.get("strengths", [])
+        overall_narrative = data.get("overall_narrative", "")
+        if not big_five:
+            raise ValueError("No Big Five data returned")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Could not parse psychological profile from AI response") from exc
+
+    return PsychProfileResponse(
+        big_five=big_five,
+        clinical_observations=clinical_observations,
+        core_tensions=core_tensions,
+        strengths=strengths,
+        overall_narrative=overall_narrative,
+        model=actual_model,
+    )

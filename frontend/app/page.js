@@ -392,6 +392,11 @@ export default function HomePage() {
   const [isMentalModelLoading, setIsMentalModelLoading] = useState(false);
   const [mentalModelError, setMentalModelError] = useState('');
 
+  // Psych profile state
+  const [psychProfile, setPsychProfile] = useState(null);
+  const [isPsychLoading, setIsPsychLoading] = useState(false);
+  const [psychError, setPsychError] = useState('');
+
   useEffect(() => {
     setTodayLabel(formatDate(new Date(), { weekday: 'long', month: 'long', day: 'numeric' }));
   }, []);
@@ -548,6 +553,26 @@ export default function HomePage() {
       setMentalModelError(error.message || 'Could not build mental model');
     } finally {
       setIsMentalModelLoading(false);
+    }
+  };
+
+  const loadPsychProfile = async () => {
+    if (!token) { showToast('Please sign in first'); return; }
+    setIsPsychLoading(true);
+    setPsychError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/psych-profile`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not build psychological profile');
+      setPsychProfile(data);
+    } catch (error) {
+      setPsychError(error.message || 'Could not build psychological profile');
+    } finally {
+      setIsPsychLoading(false);
     }
   };
 
@@ -720,6 +745,10 @@ export default function HomePage() {
           <button type="button" className={`rail-link ${activeView === 'mentalmodel' ? 'is-active' : ''}`} onClick={() => setActiveView('mentalmodel')}>
             <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2" stroke="currentColor" strokeWidth="1.2" /><circle cx="4" cy="5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="16" cy="5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="4" cy="15" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="16" cy="15" r="1.5" stroke="currentColor" strokeWidth="1.2" /><path d="M5.5 5.8L8.5 8.5M11.5 8.5L14.5 5.8M5.5 14.2L8.5 11.5M11.5 11.5L14.5 14.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" /></svg>
             Mental model
+          </button>
+          <button type="button" className={`rail-link ${activeView === 'psychprofile' ? 'is-active' : ''}`} onClick={() => setActiveView('psychprofile')}>
+            <svg viewBox="0 0 20 20" fill="none"><path d="M10 2.5C7 2.5 4.5 5 4.5 8c0 2.1 1.1 3.9 2.8 4.9V15h5.4v-2.1c1.7-1 2.8-2.8 2.8-4.9 0-3-2.5-5.5-5.5-5.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="M7.5 17.5h5M8.5 15.5v2M11.5 15.5v2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
+            Psych profile
           </button>
         </nav>
 
@@ -1147,6 +1176,175 @@ export default function HomePage() {
                 })}
               </div>
             </div>
+          </div>
+        )}
+      </main>
+
+      {/* ── Psychological Profile ── */}
+      <main className={`page ${activeView === 'psychprofile' ? '' : 'is-hidden'}`} id="view-psychprofile">
+        <header className="page-header">
+          <div className="page-header-text">
+            <span className="eyebrow">Psychological profile</span>
+            <h1 className="page-title">A mirror, not a verdict</h1>
+          </div>
+          {token && (
+            <button className="solid-btn" onClick={loadPsychProfile} disabled={isPsychLoading}>
+              {isPsychLoading ? 'Analysing…' : psychProfile ? 'Rebuild profile' : 'Build my profile'}
+            </button>
+          )}
+        </header>
+
+        <div className="psych-disclaimer" role="note">
+          <svg viewBox="0 0 16 16" fill="none" style={{ width: 15, height: 15, flexShrink: 0, marginTop: 1 }}>
+            <circle cx="8" cy="8" r="6.3" stroke="currentColor" strokeWidth="1.2"/>
+            <path d="M8 5.2v4M8 10.8v.15" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+          </svg>
+          <span>
+            <strong>This is not a clinical diagnosis.</strong> This profile is generated from your personal writing using
+            the Big Five personality framework and broad observational lenses. It reflects patterns in your words, not
+            a professional psychological evaluation. Please do not use it to make medical, therapeutic, or major life
+            decisions. If you have concerns about your mental health, speak with a qualified professional.
+          </span>
+        </div>
+
+        {!token && (
+          <div className="mental-model-empty">
+            <p>Sign in to build your psychological profile.</p>
+          </div>
+        )}
+
+        {token && !psychProfile && !isPsychLoading && !psychError && (
+          <div className="mental-model-empty">
+            <svg viewBox="0 0 64 64" fill="none" className="mental-model-empty-icon">
+              <path d="M32 8C22 8 14 16 14 26c0 7 3.6 13.2 9.2 16.8V46h17.6v-3.2C46.4 39.2 50 33 50 26c0-10-8-18-18-18Z" stroke="#C9A893" strokeWidth="1.5" strokeLinejoin="round"/>
+              <path d="M24 54h16M27 46v8M37 46v8" stroke="#C9A893" strokeWidth="1.4" strokeLinecap="round"/>
+            </svg>
+            <p>Press "Build my profile" to generate a psychological profile from your journal entries and conversations.</p>
+            {entries.length < 3 && (
+              <p className="mental-model-hint">Write at least a few entries first — the more you've written, the more accurate the profile.</p>
+            )}
+          </div>
+        )}
+
+        {isPsychLoading && (
+          <div className="mental-model-loading">
+            <div className="mental-model-spinner" />
+            <p>Reading your writing carefully — this takes a moment…</p>
+          </div>
+        )}
+
+        {psychError && (
+          <div className="mental-model-error">
+            <p>{psychError}</p>
+            <button className="ghost-btn" onClick={loadPsychProfile}>Try again</button>
+          </div>
+        )}
+
+        {psychProfile && !isPsychLoading && (
+          <div className="psych-content">
+
+            {/* Overall narrative */}
+            <div className="mental-model-summary">
+              <svg viewBox="0 0 20 20" fill="none" className="reflect-card-icon" style={{ flexShrink: 0, marginTop: 2 }}>
+                <path d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4L10 13.5l-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+              </svg>
+              <p>{psychProfile.overall_narrative}</p>
+            </div>
+
+            {/* Big Five */}
+            <section className="psych-section">
+              <h2 className="psych-section-title">Big Five personality dimensions</h2>
+              <p className="psych-section-sub">Scores are inferred from your writing — not a psychometric test. Treat them as rough compass bearings.</p>
+              <div className="psych-big-five">
+                {[
+                  { key: 'openness', label: 'Openness', desc: 'Curiosity, imagination, breadth of experience' },
+                  { key: 'conscientiousness', label: 'Conscientiousness', desc: 'Organisation, self-discipline, goal-directedness' },
+                  { key: 'extraversion', label: 'Extraversion', desc: 'Sociability, assertiveness, energy from others' },
+                  { key: 'agreeableness', label: 'Agreeableness', desc: 'Warmth, cooperation, trust in others' },
+                  { key: 'neuroticism', label: 'Neuroticism', desc: 'Emotional reactivity, sensitivity to stress' },
+                ].map(({ key, label, desc }) => {
+                  const dim = psychProfile.big_five[key];
+                  if (!dim) return null;
+                  const score = dim.score ?? 50;
+                  const barColor = key === 'neuroticism'
+                    ? score > 65 ? '#D4B8B8' : score > 40 ? '#C9A893' : '#B8D4C8'
+                    : score > 65 ? '#B8D4C8' : score > 40 ? '#C9A893' : '#D4B8B8';
+                  return (
+                    <div key={key} className="psych-trait-card">
+                      <div className="psych-trait-head">
+                        <div>
+                          <span className="psych-trait-label">{label}</span>
+                          <span className="psych-trait-desc">{desc}</span>
+                        </div>
+                        <span className="psych-trait-badge" style={{ background: barColor }}>{dim.label}</span>
+                      </div>
+                      <div className="psych-bar-track">
+                        <div className="psych-bar-fill" style={{ width: `${score}%`, background: barColor }} />
+                      </div>
+                      <p className="psych-trait-summary">{dim.summary}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Clinical observations */}
+            {psychProfile.clinical_observations?.length > 0 && (
+              <section className="psych-section">
+                <h2 className="psych-section-title">Observational findings</h2>
+                <p className="psych-section-sub">Patterns noticed across your writing — not diagnoses.</p>
+                <div className="psych-observations">
+                  {psychProfile.clinical_observations.map((obs, i) => {
+                    const signalColors = {
+                      low:      { bg: '#F0F4F2', border: '#B8D4C8', dot: '#7AA898' },
+                      moderate: { bg: '#F6F2EE', border: '#C9A893', dot: '#A8765E' },
+                      elevated: { bg: '#F4F0F6', border: '#C4B8D4', dot: '#8A7AA8' },
+                      high:     { bg: '#F4EEEE', border: '#D4B8B8', dot: '#A87A7A' },
+                    };
+                    const colors = signalColors[obs.signal] || signalColors.moderate;
+                    return (
+                      <div key={i} className="psych-obs-card" style={{ background: colors.bg, borderColor: colors.border }}>
+                        <div className="psych-obs-head">
+                          <span className="psych-obs-domain">{obs.domain}</span>
+                          <span className="psych-obs-signal" style={{ color: colors.dot }}>
+                            <span className="psych-obs-dot" style={{ background: colors.dot }} />
+                            {obs.signal}
+                          </span>
+                        </div>
+                        <p className="psych-obs-finding">{obs.finding}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {/* Tensions & Strengths */}
+            <div className="psych-two-col">
+              {psychProfile.core_tensions?.length > 0 && (
+                <section className="psych-section psych-section-card">
+                  <h2 className="psych-section-title">Core tensions</h2>
+                  <p className="psych-section-sub">Unresolved conflicts visible in your writing.</p>
+                  <ul className="psych-list psych-list-tension">
+                    {psychProfile.core_tensions.map((t, i) => (
+                      <li key={i}>{t}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {psychProfile.strengths?.length > 0 && (
+                <section className="psych-section psych-section-card">
+                  <h2 className="psych-section-title">Psychological strengths</h2>
+                  <p className="psych-section-sub">Genuine capacities visible in your writing.</p>
+                  <ul className="psych-list psych-list-strength">
+                    {psychProfile.strengths.map((s, i) => (
+                      <li key={i}>{s}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+
           </div>
         )}
       </main>
