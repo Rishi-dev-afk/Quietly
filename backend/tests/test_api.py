@@ -51,3 +51,60 @@ def test_register_login_and_entries_flow(client):
     data = entries_response.json()
     assert len(data["entries"]) >= 1
     assert data["entries"][0]["content"].startswith("A calm")
+
+
+def test_reflect_requires_auth(client):
+    response = client.post("/api/ai/reflect", json={"content": "hello"})
+    assert response.status_code in (401, 403)
+
+
+def test_reflect_without_configured_key_returns_503(client, monkeypatch):
+    register_response = client.post(
+        "/api/auth/register",
+        json={"email": "reflect@example.com", "password": "secret123", "display_name": "Reflect"},
+    )
+    assert register_response.status_code == 201
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "reflect@example.com", "password": "secret123"},
+    )
+    token = login_response.json()["access_token"]
+    auth_headers = {"Authorization": f"Bearer {token}"}
+
+    import main
+
+    monkeypatch.setattr(main, "OPENROUTER_API_KEY", "")
+
+    response = client.post(
+        "/api/ai/reflect",
+        headers=auth_headers,
+        json={"content": "A real journal entry."},
+    )
+    assert response.status_code == 503
+
+
+def test_reflect_requires_nonempty_content(client, monkeypatch):
+    register_response = client.post(
+        "/api/auth/register",
+        json={"email": "reflect2@example.com", "password": "secret123", "display_name": "Reflect2"},
+    )
+    assert register_response.status_code == 201
+
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "reflect2@example.com", "password": "secret123"},
+    )
+    token = login_response.json()["access_token"]
+    auth_headers = {"Authorization": f"Bearer {token}"}
+
+    import main
+
+    monkeypatch.setattr(main, "OPENROUTER_API_KEY", "sk-or-fake-for-test")
+
+    response = client.post(
+        "/api/ai/reflect",
+        headers=auth_headers,
+        json={"content": "   "},
+    )
+    assert response.status_code == 400

@@ -90,6 +90,27 @@ function ThreadSVG({ entries, height = 100, amp = 26, bg = '#FFFFFF' }) {
   );
 }
 
+function ReflectionCard({ state }) {
+  if (!state) return null;
+  const isError = state.status === 'error';
+  const isLoading = state.status === 'loading';
+
+  return (
+    <div className={`reflect-card ${isError ? 'is-error' : ''}`} role="status" aria-live="polite">
+      <svg className="reflect-card-icon" viewBox="0 0 20 20" fill="none">
+        <path d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4L10 13.5l-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+        <path d="M16 13.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7.7-2Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" />
+      </svg>
+      <div className="reflect-card-body">
+        <span className="reflect-card-label">{isError ? 'Could not reflect' : 'A reflection'}</span>
+        <p className="reflect-card-text">
+          {isLoading ? 'Reading what you wrote…' : state.text}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [activeView, setActiveView] = useState('write');
   const [activeFilter, setActiveFilter] = useState('all');
@@ -108,6 +129,8 @@ export default function HomePage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [authMessage, setAuthMessage] = useState('');
+  const [expandedEntryId, setExpandedEntryId] = useState(null);
+  const [reflections, setReflections] = useState({});
 
   useEffect(() => {
     setTodayLabel(formatDate(new Date(), { weekday: 'long', month: 'long', day: 'numeric' }));
@@ -125,6 +148,35 @@ export default function HomePage() {
   const showToast = (message, duration = 2200) => {
     setActionLabel(message);
     window.setTimeout(() => setActionLabel(''), duration);
+  };
+
+  const requestReflection = async (key, content) => {
+    if (!content || !content.trim()) {
+      showToast('Write something first');
+      return;
+    }
+
+    setReflections((current) => ({ ...current, [key]: { status: 'loading' } }));
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/reflect`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ content }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || 'Could not get a reflection right now');
+      }
+      setReflections((current) => ({ ...current, [key]: { status: 'done', text: data.reflection } }));
+    } catch (error) {
+      setReflections((current) => ({
+        ...current,
+        [key]: { status: 'error', text: error.message || 'Could not get a reflection right now' },
+      }));
+    }
   };
 
   const clearAuth = () => {
@@ -443,12 +495,17 @@ export default function HomePage() {
           <div className="editor-foot">
             <span className="word-count" id="wordCount">{wordCount}</span>
             <div className="editor-actions">
+              <button className="ghost-btn" onClick={() => requestReflection('draft', editorValue)} disabled={reflections.draft?.status === 'loading'}>
+                {reflections.draft?.status === 'loading' ? 'Reflecting…' : 'Reflect on this'}
+              </button>
               <button className="ghost-btn" id="saveDraftBtn" onClick={handleSave}>Save as draft</button>
               <button className="solid-btn" id="closeEntryBtn" onClick={handleClose}>Close today's entry</button>
               {token ? <button className="ghost-btn" onClick={handleLogout}>Log out</button> : null}
             </div>
           </div>
         </section>
+
+        <ReflectionCard state={reflections.draft} />
 
         {actionLabel ? (
           <div className="toast" role="status" aria-live="polite">
@@ -463,6 +520,7 @@ export default function HomePage() {
           </div>
           <div className="thread" id="threadSvgHolder"><ThreadSVG entries={entries.slice(-14)} height={100} amp={26} bg="#FFFFFF" /></div>
         </section>
+
 
       </main>
 
@@ -480,20 +538,47 @@ export default function HomePage() {
           </div>
         </header>
 
+        <p className="entry-meta" style={{ marginTop: '20px' }}>Click any entry to read the full text and ask for a reflection.</p>
+
         <div className="entry-list" id="entryList">
           {isLoading ? <p className="entry-meta">Loading entries…</p> : null}
           {filteredEntries.map((entry) => {
             const dateStr = formatDate(entry.date, { month: 'short', day: 'numeric' });
             const weekday = formatDate(entry.date, { weekday: 'short' });
+            const isExpanded = expandedEntryId === entry.id;
+            const reflectionKey = `entry-${entry.id}`;
             return (
-              <div key={`${entry.date}-${entry.snippet}`} className="entry-row">
-                <div className="entry-date"><strong>{dateStr}</strong>{weekday}</div>
-                <div className="entry-mood-mark" style={{ background: MOOD_COLORS[entry.mood] }} title={MOOD_LABELS[entry.mood]} />
-                <div className="entry-body">
-                  <p className="entry-snippet">{entry.snippet}</p>
-                  <span className="entry-meta">{entry.words} words · {MOOD_LABELS[entry.mood]}</span>
-                </div>
-                <div className="entry-save">{entry.saved ? 'Saved ✓' : ''}</div>
+              <div key={entry.id}>
+                <button
+                  type="button"
+                  className={`entry-row ${isExpanded ? 'is-expanded' : ''}`}
+                  onClick={() => setExpandedEntryId(isExpanded ? null : entry.id)}
+                  aria-expanded={isExpanded}
+                >
+                  <div className="entry-date"><strong>{dateStr}</strong>{weekday}</div>
+                  <div className="entry-mood-mark" style={{ background: MOOD_COLORS[entry.mood] }} title={MOOD_LABELS[entry.mood]} />
+                  <div className="entry-body">
+                    <p className="entry-snippet">{entry.snippet}</p>
+                    <span className="entry-meta">{entry.words} words · {MOOD_LABELS[entry.mood]}</span>
+                  </div>
+                  <div className="entry-save">{entry.saved ? 'Saved ✓' : ''}</div>
+                </button>
+                {isExpanded ? (
+                  <div className="entry-expanded">
+                    <p className="entry-expanded-text">{entry.snippet}</p>
+                    <div className="entry-expanded-actions">
+                      <button
+                        type="button"
+                        className="ghost-btn"
+                        onClick={() => requestReflection(reflectionKey, entry.snippet)}
+                        disabled={reflections[reflectionKey]?.status === 'loading'}
+                      >
+                        {reflections[reflectionKey]?.status === 'loading' ? 'Reflecting…' : 'Reflect on this entry'}
+                      </button>
+                    </div>
+                    <ReflectionCard state={reflections[reflectionKey]} />
+                  </div>
+                ) : null}
               </div>
             );
           })}

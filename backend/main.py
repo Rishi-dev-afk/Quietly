@@ -2,6 +2,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -11,10 +13,34 @@ from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from pydantic import BaseModel, EmailStr, Field
 
+load_dotenv()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./neurotwin.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 7)))  # default: 7 days
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "anthropic/claude-haiku-4.5")
+
+REFLECTION_SYSTEM_PROMPT = """You are a calm, observing listener inside a private journaling app called Quietly.
+Someone has just shared a journal entry with you. Your role is to help them reflect — not to diagnose, treat, \
+coach, or give advice unless they clearly ask for practical suggestions.
+
+How to respond:
+- Read what they wrote carefully and reflect back what you notice — themes, shifts in feeling, things they \
+might not have said directly — in your own words, gently and without judgment.
+- Do not ask any questions. This is a one-way reflection, not the start of a conversation — end your response \
+with an observation, not a question.
+- Keep your tone warm, plain, and human. No clinical labels, no diagnoses, no therapy-speak, no forced positivity.
+- Do not tell them what to do, fix their problem, or rush to reassure them that everything is fine.
+- Keep your response brief — a few sentences to a short paragraph is plenty. This is a reflection, not an essay.
+- Never claim to be a therapist, doctor, or any kind of medical professional, and don't pretend this replaces one.
+- If the entry suggests they may be in crisis or at risk of harming themselves, gently and directly encourage them \
+to reach out to a crisis line or a trusted person right now, in addition to anything else you say.
+"""
+
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -99,6 +125,16 @@ class JournalEntryResponse(BaseModel):
 
 class JournalEntryListResponse(BaseModel):
     entries: list[JournalEntryResponse]
+
+
+class ReflectionRequest(BaseModel):
+    content: str = Field(min_length=1)
+    model: str | None = None
+
+
+class ReflectionResponse(BaseModel):
+    reflection: str
+    model: str
 
 
 def get_db():
@@ -194,3 +230,54 @@ def create_entry(payload: JournalEntryCreate, current_user: CurrentUser, db: Ses
     db.commit()
     db.refresh(entry)
     return JournalEntryResponse(id=entry.id, content=entry.content, mood=entry.mood, status=entry.status, created_at=entry.created_at)
+
+
+@app.post("/api/ai/reflect", response_model=ReflectionResponse)
+async def reflect_on_entry(payload: ReflectionRequest, current_user: CurrentUser):
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="AI reflections aren't configured yet. Set OPENROUTER_API_KEY on the server.",
+        )
+
+    if not payload.content.strip():
+        raise HTTPException(status_code=400, detail="There's nothing written yet to reflect on")
+
+    model = payload.model or OPENROUTER_DEFAULT_MODEL
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                OPENROUTER_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
+                        {"role": "user", "content": payload.content},
+                    ],
+                },
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail="Could not reach OpenRouter. Please try again.") from exc
+
+    if response.status_code == 401:
+        raise HTTPException(status_code=502, detail="OpenRouter rejected the server's API key")
+    if response.status_code == 402:
+        raise HTTPException(status_code=502, detail="The server's OpenRouter account is out of credits")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail="OpenRouter could not complete the request")
+
+    data = response.json()
+    try:
+        message = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail="OpenRouter returned an unexpected response") from exc
+
+    if not message or not message.strip():
+        raise HTTPException(status_code=502, detail="OpenRouter returned an empty response")
+
+    return ReflectionResponse(reflection=message.strip(), model=data.get("model", model))
