@@ -7,7 +7,7 @@ from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -186,17 +186,46 @@ class ChatMessage(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class MentalModelSnapshot(Base):
+    __tablename__ = "mental_model_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    nodes_json = Column(Text, nullable=False)
+    edges_json = Column(Text, nullable=False)
+    summary = Column(Text, nullable=False)
+    entry_count_at_build = Column(Integer, default=0)
+    model = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PsychProfileSnapshot(Base):
+    __tablename__ = "psych_profile_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    big_five_json = Column(Text, nullable=False)
+    clinical_observations_json = Column(Text, nullable=False)
+    core_tensions_json = Column(Text, nullable=False)
+    strengths_json = Column(Text, nullable=False)
+    overall_narrative = Column(Text, nullable=False)
+    entry_count_at_build = Column(Integer, default=0)
+    model = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 Base.metadata.create_all(bind=engine)
 
 # ─── Auth ──────────────────────────────────────────────────────────────────────
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
-app = FastAPI(title="NeuroTwin API")
+optional_security = HTTPBearer(auto_error=False)
+app = FastAPI(title="Quietly API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://bookish-halibut-x59jw447wvjwhpqvq-3000.app.github.dev/"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_origin_regex=r"https://.*\.app\.github\.dev",
     allow_credentials=True,
     allow_methods=["*"],
@@ -304,6 +333,19 @@ class MentalModelResponse(BaseModel):
     edges: list[dict]
     summary: str
     model: str
+    created_at: datetime | None = None
+    entry_count_at_build: int | None = None
+
+
+class MentalModelStatusResponse(BaseModel):
+    has_snapshot: bool
+    entries_total: int
+    entries_required: int
+    entries_remaining: int
+    unlocked: bool
+    update_available: bool
+    last_built_at: datetime | None = None
+    last_entry_count: int | None = None
 
 
 class PsychProfileRequest(BaseModel):
@@ -317,6 +359,25 @@ class PsychProfileResponse(BaseModel):
     strengths: list[str]
     overall_narrative: str
     model: str
+    created_at: datetime | None = None
+    entry_count_at_build: int | None = None
+
+
+class PsychProfileStatusResponse(BaseModel):
+    has_snapshot: bool
+    entries_total: int
+    entries_required: int
+    entries_remaining: int
+    unlocked: bool
+    update_available: bool
+    last_built_at: datetime | None = None
+    last_entry_count: int | None = None
+
+
+# How many journal entries a user needs before the mental model / psych profile features unlock,
+# and how many *new* entries since the last build before we flag that an update is worth running.
+ANALYSIS_UNLOCK_ENTRY_COUNT = 5
+ANALYSIS_REFRESH_EVERY_N_ENTRIES = 5
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -360,6 +421,50 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     return user
 
 
+def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Like get_current_user, but returns None instead of raising when no/invalid credentials are given.
+    Used by routes that should work for both signed-in and anonymous visitors (e.g. the first reflection,
+    before someone has created an account)."""
+    if credentials is None:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str | None = payload.get("sub")
+        if email is None:
+            return None
+    except JWTError:
+        return None
+
+    return db.query(User).filter(User.email == email).first()
+
+
+# Simple in-memory rate limit for anonymous (unauthenticated) AI calls. This is intentionally lightweight —
+# it resets if the server restarts and isn't shared across multiple server processes — but it's enough to
+# stop casual abuse of the anonymous reflection endpoint without adding new infrastructure (e.g. Redis).
+# Signed-in users are not affected by this limiter.
+ANON_REFLECT_LIMIT = 5
+ANON_REFLECT_WINDOW_SECONDS = 60 * 60  # 1 hour
+_anon_reflect_hits: dict[str, list[float]] = {}
+
+
+def enforce_anon_rate_limit(request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - ANON_REFLECT_WINDOW_SECONDS
+
+    hits = [t for t in _anon_reflect_hits.get(client_ip, []) if t > cutoff]
+    if len(hits) >= ANON_REFLECT_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="You've used up your free reflections for now. Create a free account to keep going.",
+        )
+    hits.append(now)
+    _anon_reflect_hits[client_ip] = hits
+
+
 async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -> tuple[str, str]:
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=503, detail="AI features aren't configured yet. Set OPENROUTER_API_KEY on the server.")
@@ -394,12 +499,13 @@ async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+CurrentUserOptional = Annotated[User | None, Depends(get_current_user_optional)]
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def read_root():
-    return {"message": "NeuroTwin API is running"}
+    return {"message": "Quietly API is running"}
 
 
 @app.get("/api/health")
@@ -460,9 +566,15 @@ def create_entry(payload: JournalEntryCreate, current_user: CurrentUser, db: Ses
 # AI — Reflect
 
 @app.post("/api/ai/reflect", response_model=ReflectionResponse)
-async def reflect_on_entry(payload: ReflectionRequest, current_user: CurrentUser):
+async def reflect_on_entry(payload: ReflectionRequest, request: Request, current_user: CurrentUserOptional):
     if not payload.content.strip():
         raise HTTPException(status_code=400, detail="There's nothing written yet to reflect on")
+
+    # Anyone can get a reflection — including before they've created an account — but anonymous
+    # visitors are rate-limited per IP to prevent abuse of the server's AI credits. Signed-in users
+    # are not subject to this limit.
+    if current_user is None:
+        enforce_anon_rate_limit(request)
 
     model = payload.model or OPENROUTER_DEFAULT_MODEL
     messages = [
@@ -572,8 +684,11 @@ def get_chat_session(session_id: str, current_user: CurrentUser, db: Session = D
 
 # AI — Mental Model (journals + chats)
 
-@app.post("/api/ai/mental-model", response_model=MentalModelResponse)
-async def build_mental_model(payload: MentalModelRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+def build_content_digest(current_user: User, db: Session) -> tuple[str, int]:
+    """Shared helper for the mental-model and psych-profile routes: pulls recent journal entries and
+    chat messages for a user and renders them into a single readable digest string for the AI prompt.
+    Returns (digest, total_entry_count) — total_entry_count is the user's full entry count (not just
+    the 30 most recent included in the digest), used for unlock/refresh gating."""
     entries = (
         db.query(JournalEntry)
         .filter(JournalEntry.user_id == current_user.id)
@@ -581,6 +696,7 @@ async def build_mental_model(payload: MentalModelRequest, current_user: CurrentU
         .limit(30)
         .all()
     )
+    total_entry_count = db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
 
     chat_messages = (
         db.query(ChatMessage)
@@ -595,16 +711,13 @@ async def build_mental_model(payload: MentalModelRequest, current_user: CurrentU
 
     content_parts = []
 
-    # Journal entries
     for entry in entries:
         date_str = entry.created_at.strftime("%b %d")
         mood_label = {1: "Heavy", 2: "Low", 3: "Steady", 4: "Lighter", 5: "Open"}.get(entry.mood, "Steady")
         truncated = entry.content[:600] + ("…" if len(entry.content) > 600 else "")
         content_parts.append(f"[Journal, {date_str}, mood: {mood_label}]\n{truncated}")
 
-    # Chat messages — group by session and build readable transcript
     if chat_messages:
-        # Group by session
         sessions: dict[str, list] = {}
         for msg in reversed(chat_messages):  # oldest first
             if msg.session_id not in sessions:
@@ -621,6 +734,56 @@ async def build_mental_model(payload: MentalModelRequest, current_user: CurrentU
             content_parts.append("\n".join(lines))
 
     digest = "\n\n---\n\n".join(content_parts)
+    return digest, total_entry_count
+
+
+def get_entry_count(current_user: User, db: Session) -> int:
+    return db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+
+
+def require_analysis_unlocked(total_entry_count: int) -> None:
+    if total_entry_count < ANALYSIS_UNLOCK_ENTRY_COUNT:
+        remaining = ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count
+        raise HTTPException(
+            status_code=403,
+            detail=f"Write {remaining} more entr{'y' if remaining == 1 else 'ies'} to unlock this feature "
+                    f"({ANALYSIS_UNLOCK_ENTRY_COUNT} total needed) — the more you've written, the more accurate this is.",
+        )
+
+
+# AI — Mental Model (journals + chats)
+
+@app.get("/api/ai/mental-model/status", response_model=MentalModelStatusResponse)
+def mental_model_status(current_user: CurrentUser, db: Session = Depends(get_db)):
+    total_entry_count = db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+    latest = (
+        db.query(MentalModelSnapshot)
+        .filter(MentalModelSnapshot.user_id == current_user.id)
+        .order_by(MentalModelSnapshot.created_at.desc())
+        .first()
+    )
+    unlocked = total_entry_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
+    update_available = False
+    if latest is not None:
+        new_entries_since = total_entry_count - (latest.entry_count_at_build or 0)
+        update_available = new_entries_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
+    return MentalModelStatusResponse(
+        has_snapshot=latest is not None,
+        entries_total=total_entry_count,
+        entries_required=ANALYSIS_UNLOCK_ENTRY_COUNT,
+        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count),
+        unlocked=unlocked,
+        update_available=update_available,
+        last_built_at=latest.created_at if latest else None,
+        last_entry_count=latest.entry_count_at_build if latest else None,
+    )
+
+
+@app.post("/api/ai/mental-model", response_model=MentalModelResponse)
+async def build_mental_model(payload: MentalModelRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+    require_analysis_unlocked(get_entry_count(current_user, db))
+    digest, total_entry_count = build_content_digest(current_user, db)
+
     user_message = f"Here is my recent journal content and conversations:\n\n{digest}"
 
     model = payload.model or OPENROUTER_DEFAULT_MODEL
@@ -642,57 +805,83 @@ async def build_mental_model(payload: MentalModelRequest, current_user: CurrentU
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail="Could not parse mental model from AI response") from exc
 
-    return MentalModelResponse(nodes=nodes, edges=edges, summary=summary, model=actual_model)
+    snapshot = MentalModelSnapshot(
+        user_id=current_user.id,
+        nodes_json=json.dumps(nodes),
+        edges_json=json.dumps(edges),
+        summary=summary,
+        entry_count_at_build=total_entry_count,
+        model=actual_model,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+
+    return MentalModelResponse(
+        nodes=nodes,
+        edges=edges,
+        summary=summary,
+        model=actual_model,
+        created_at=snapshot.created_at,
+        entry_count_at_build=snapshot.entry_count_at_build,
+    )
+
+
+@app.get("/api/ai/mental-model/latest", response_model=MentalModelResponse)
+def get_latest_mental_model(current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Returns the most recently built snapshot without calling the AI again — used so reopening the
+    Mental Model tab shows your last result instantly instead of forcing a rebuild."""
+    latest = (
+        db.query(MentalModelSnapshot)
+        .filter(MentalModelSnapshot.user_id == current_user.id)
+        .order_by(MentalModelSnapshot.created_at.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No mental model has been built yet")
+    return MentalModelResponse(
+        nodes=json.loads(latest.nodes_json),
+        edges=json.loads(latest.edges_json),
+        summary=latest.summary,
+        model=latest.model or OPENROUTER_DEFAULT_MODEL,
+        created_at=latest.created_at,
+        entry_count_at_build=latest.entry_count_at_build,
+    )
 
 
 # AI — Psychological Profile
 
+@app.get("/api/ai/psych-profile/status", response_model=PsychProfileStatusResponse)
+def psych_profile_status(current_user: CurrentUser, db: Session = Depends(get_db)):
+    total_entry_count = db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+    latest = (
+        db.query(PsychProfileSnapshot)
+        .filter(PsychProfileSnapshot.user_id == current_user.id)
+        .order_by(PsychProfileSnapshot.created_at.desc())
+        .first()
+    )
+    unlocked = total_entry_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
+    update_available = False
+    if latest is not None:
+        new_entries_since = total_entry_count - (latest.entry_count_at_build or 0)
+        update_available = new_entries_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
+    return PsychProfileStatusResponse(
+        has_snapshot=latest is not None,
+        entries_total=total_entry_count,
+        entries_required=ANALYSIS_UNLOCK_ENTRY_COUNT,
+        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count),
+        unlocked=unlocked,
+        update_available=update_available,
+        last_built_at=latest.created_at if latest else None,
+        last_entry_count=latest.entry_count_at_build if latest else None,
+    )
+
+
 @app.post("/api/ai/psych-profile", response_model=PsychProfileResponse)
 async def build_psych_profile(payload: PsychProfileRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
-    entries = (
-        db.query(JournalEntry)
-        .filter(JournalEntry.user_id == current_user.id)
-        .order_by(JournalEntry.created_at.desc())
-        .limit(30)
-        .all()
-    )
+    require_analysis_unlocked(get_entry_count(current_user, db))
+    digest, total_entry_count = build_content_digest(current_user, db)
 
-    chat_messages = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == current_user.id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(100)
-        .all()
-    )
-
-    if not entries and not chat_messages:
-        raise HTTPException(status_code=400, detail="No journal entries or conversations yet — write a few entries or have a conversation first.")
-
-    content_parts = []
-
-    for entry in entries:
-        date_str = entry.created_at.strftime("%b %d")
-        mood_label = {1: "Heavy", 2: "Low", 3: "Steady", 4: "Lighter", 5: "Open"}.get(entry.mood, "Steady")
-        truncated = entry.content[:600] + ("…" if len(entry.content) > 600 else "")
-        content_parts.append(f"[Journal, {date_str}, mood: {mood_label}]\n{truncated}")
-
-    if chat_messages:
-        sessions: dict[str, list] = {}
-        for msg in reversed(chat_messages):
-            if msg.session_id not in sessions:
-                sessions[msg.session_id] = []
-            sessions[msg.session_id].append(msg)
-
-        for session_id, msgs in list(sessions.items())[:10]:
-            date_str = msgs[0].created_at.strftime("%b %d")
-            lines = [f"[Chat, {date_str}]"]
-            for msg in msgs:
-                prefix = "You" if msg.role == "user" else "Quietly"
-                truncated = msg.content[:300] + ("…" if len(msg.content) > 300 else "")
-                lines.append(f"{prefix}: {truncated}")
-            content_parts.append("\n".join(lines))
-
-    digest = "\n\n---\n\n".join(content_parts)
     user_message = f"Here is my recent journal content and conversations:\n\n{digest}"
 
     model = payload.model or OPENROUTER_DEFAULT_MODEL
@@ -716,6 +905,20 @@ async def build_psych_profile(payload: PsychProfileRequest, current_user: Curren
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail="Could not parse psychological profile from AI response") from exc
 
+    snapshot = PsychProfileSnapshot(
+        user_id=current_user.id,
+        big_five_json=json.dumps(big_five),
+        clinical_observations_json=json.dumps(clinical_observations),
+        core_tensions_json=json.dumps(core_tensions),
+        strengths_json=json.dumps(strengths),
+        overall_narrative=overall_narrative,
+        entry_count_at_build=total_entry_count,
+        model=actual_model,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+
     return PsychProfileResponse(
         big_five=big_five,
         clinical_observations=clinical_observations,
@@ -723,4 +926,29 @@ async def build_psych_profile(payload: PsychProfileRequest, current_user: Curren
         strengths=strengths,
         overall_narrative=overall_narrative,
         model=actual_model,
+        created_at=snapshot.created_at,
+        entry_count_at_build=snapshot.entry_count_at_build,
+    )
+
+
+@app.get("/api/ai/psych-profile/latest", response_model=PsychProfileResponse)
+def get_latest_psych_profile(current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Returns the most recently built snapshot without calling the AI again."""
+    latest = (
+        db.query(PsychProfileSnapshot)
+        .filter(PsychProfileSnapshot.user_id == current_user.id)
+        .order_by(PsychProfileSnapshot.created_at.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No psychological profile has been built yet")
+    return PsychProfileResponse(
+        big_five=json.loads(latest.big_five_json),
+        clinical_observations=json.loads(latest.clinical_observations_json),
+        core_tensions=json.loads(latest.core_tensions_json),
+        strengths=json.loads(latest.strengths_json),
+        overall_narrative=latest.overall_narrative,
+        model=latest.model or OPENROUTER_DEFAULT_MODEL,
+        created_at=latest.created_at,
+        entry_count_at_build=latest.entry_count_at_build,
     )

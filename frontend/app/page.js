@@ -64,6 +64,45 @@ function computeWordCloud(entries) {
     .slice(0, 20);
 }
 
+// ─── "Since last time" diffing ──────────────────────────────────────────────────
+// Both diff helpers are deliberately conservative: they only surface a change when it's large
+// enough to be meaningful (avoids noisy "+1" chatter from normal AI output variance), and they
+// never claim more precision than a small-sample LLM read genuinely supports.
+
+function diffMentalModels(previous, current) {
+  if (!previous || !current) return null;
+  const prevByLabel = new Map(previous.nodes.map((n) => [n.label.toLowerCase(), n]));
+  const currByLabel = new Map(current.nodes.map((n) => [n.label.toLowerCase(), n]));
+
+  const newcomers = current.nodes.filter((n) => !prevByLabel.has(n.label.toLowerCase()));
+  const faded = previous.nodes.filter((n) => !currByLabel.has(n.label.toLowerCase()));
+  const shifted = [];
+  for (const [label, currNode] of currByLabel) {
+    const prevNode = prevByLabel.get(label);
+    if (prevNode && Math.abs(currNode.weight - prevNode.weight) >= 2) {
+      shifted.push({ label: currNode.label, from: prevNode.weight, to: currNode.weight });
+    }
+  }
+
+  if (newcomers.length === 0 && faded.length === 0 && shifted.length === 0) return null;
+  return { newcomers, faded, shifted };
+}
+
+function diffPsychProfiles(previous, current) {
+  if (!previous || !current) return null;
+  const dims = ['openness', 'conscientiousness', 'extraversion', 'agreeableness', 'neuroticism'];
+  const shifts = [];
+  for (const dim of dims) {
+    const prevScore = previous.big_five?.[dim]?.score;
+    const currScore = current.big_five?.[dim]?.score;
+    if (typeof prevScore === 'number' && typeof currScore === 'number' && Math.abs(currScore - prevScore) >= 8) {
+      shifts.push({ dim, from: prevScore, to: currScore });
+    }
+  }
+  if (shifts.length === 0) return null;
+  return { shifts };
+}
+
 function formatDate(date, options) {
   return new Intl.DateTimeFormat('en-US', { ...options }).format(date);
 }
@@ -375,6 +414,7 @@ export default function HomePage() {
   const [authMessage, setAuthMessage] = useState('');
   const [expandedEntryId, setExpandedEntryId] = useState(null);
   const [reflections, setReflections] = useState({});
+  const [showSavePrompt, setShowSavePrompt] = useState(false);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([]);
@@ -389,11 +429,15 @@ export default function HomePage() {
 
   // Mental model state
   const [mentalModel, setMentalModel] = useState(null);
+  const [previousMentalModel, setPreviousMentalModel] = useState(null);
+  const [mentalModelStatus, setMentalModelStatus] = useState(null);
   const [isMentalModelLoading, setIsMentalModelLoading] = useState(false);
   const [mentalModelError, setMentalModelError] = useState('');
 
   // Psych profile state
   const [psychProfile, setPsychProfile] = useState(null);
+  const [previousPsychProfile, setPreviousPsychProfile] = useState(null);
+  const [psychProfileStatus, setPsychProfileStatus] = useState(null);
   const [isPsychLoading, setIsPsychLoading] = useState(false);
   const [psychError, setPsychError] = useState('');
 
@@ -428,14 +472,21 @@ export default function HomePage() {
     }
     setReflections((current) => ({ ...current, [key]: { status: 'loading' } }));
     try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
       const response = await fetch(`${API_BASE_URL}/api/ai/reflect`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers,
         body: JSON.stringify({ content }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not get a reflection right now');
       setReflections((current) => ({ ...current, [key]: { status: 'done', text: data.reflection } }));
+      // First reflection while signed out is the moment to invite saving — the reward came first,
+      // so the ask doesn't feel like a wall.
+      if (key === 'draft' && !token) {
+        setShowSavePrompt(true);
+      }
     } catch (error) {
       setReflections((current) => ({
         ...current,
@@ -536,6 +587,56 @@ export default function HomePage() {
     }
   }, [chatView, token]);
 
+  // Load status (and last snapshot, if any) when opening the Mental Model / Psych Profile tabs,
+  // so returning users see their last result and an "update available" signal rather than a blank slate.
+  useEffect(() => {
+    if (activeView === 'mentalmodel' && token) {
+      loadMentalModelStatus();
+    }
+  }, [activeView, token]);
+
+  useEffect(() => {
+    if (activeView === 'psychprofile' && token) {
+      loadPsychProfileStatus();
+    }
+  }, [activeView, token]);
+
+  const loadMentalModelStatus = async () => {
+    if (!token) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/mental-model/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      setMentalModelStatus(data);
+      // If a snapshot already exists and we haven't loaded one into view yet, fetch it so
+      // reopening the tab shows the last result instantly instead of an empty state.
+      if (data.has_snapshot && !mentalModel) {
+        const latestResponse = await fetch(`${API_BASE_URL}/api/ai/mental-model/latest`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (latestResponse.ok) {
+          const latestData = await latestResponse.json();
+          setMentalModel(latestData);
+        }
+      }
+    } catch {
+      // Status is a soft enhancement, but the gate still needs *something* to render against —
+      // fall back to the entry count we already have client-side rather than spinning forever.
+      setMentalModelStatus((current) => current || {
+        has_snapshot: false,
+        entries_total: entries.length,
+        entries_required: 5,
+        entries_remaining: Math.max(0, 5 - entries.length),
+        unlocked: entries.length >= 5,
+        update_available: false,
+        last_built_at: null,
+        last_entry_count: null,
+      });
+    }
+  };
+
   const loadMentalModel = async () => {
     if (!token) { showToast('Please sign in first'); return; }
     setIsMentalModelLoading(true);
@@ -548,11 +649,45 @@ export default function HomePage() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not build mental model');
+      setPreviousMentalModel(mentalModel);
       setMentalModel(data);
+      loadMentalModelStatus();
     } catch (error) {
       setMentalModelError(error.message || 'Could not build mental model');
     } finally {
       setIsMentalModelLoading(false);
+    }
+  };
+
+  const loadPsychProfileStatus = async () => {
+    if (!token) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/psych-profile/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      setPsychProfileStatus(data);
+      if (data.has_snapshot && !psychProfile) {
+        const latestResponse = await fetch(`${API_BASE_URL}/api/ai/psych-profile/latest`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (latestResponse.ok) {
+          const latestData = await latestResponse.json();
+          setPsychProfile(latestData);
+        }
+      }
+    } catch {
+      setPsychProfileStatus((current) => current || {
+        has_snapshot: false,
+        entries_total: entries.length,
+        entries_required: 5,
+        entries_remaining: Math.max(0, 5 - entries.length),
+        unlocked: entries.length >= 5,
+        update_available: false,
+        last_built_at: null,
+        last_entry_count: null,
+      });
     }
   };
 
@@ -568,7 +703,9 @@ export default function HomePage() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not build psychological profile');
+      setPreviousPsychProfile(psychProfile);
       setPsychProfile(data);
+      loadPsychProfileStatus();
     } catch (error) {
       setPsychError(error.message || 'Could not build psychological profile');
     } finally {
@@ -583,6 +720,12 @@ export default function HomePage() {
     setChatMessages([]);
     setChatSessions([]);
     setCurrentSessionId(null);
+    setMentalModel(null);
+    setPreviousMentalModel(null);
+    setMentalModelStatus(null);
+    setPsychProfile(null);
+    setPreviousPsychProfile(null);
+    setPsychProfileStatus(null);
     window.localStorage.removeItem('neurotwin-token');
     window.localStorage.removeItem('neurotwin-user');
   };
@@ -644,7 +787,13 @@ export default function HomePage() {
   };
 
   const submitEntry = async (entryStatus) => {
-    if (!token) { showToast('Please sign in first'); return; }
+    if (!token) {
+      // Don't dead-end here — this is exactly the moment to invite account creation,
+      // with their writing already in hand rather than asking for it up front.
+      setShowSavePrompt(true);
+      showToast('Create a free account to save this');
+      return;
+    }
     try {
       const response = await fetch(`${API_BASE_URL}/api/journal/entries`, {
         method: 'POST',
@@ -656,6 +805,7 @@ export default function HomePage() {
       const data = await response.json();
       setEntries((current) => [mapEntryToViewModel(data), ...current]);
       setEditorValue('');
+      setShowSavePrompt(false);
       showToast(entryStatus === 'closed' ? "Today's entry closed" : 'Draft saved');
     } catch {
       showToast(entryStatus === 'closed' ? 'Unable to close entry' : 'Unable to save entry');
@@ -697,7 +847,31 @@ export default function HomePage() {
         window.localStorage.setItem('neurotwin-token', data.access_token);
         window.localStorage.setItem('neurotwin-user', JSON.stringify(profile));
         setPassword('');
-        showToast(`Welcome back, ${profile.display_name}`);
+        setShowSavePrompt(false);
+
+        // If they wrote something before signing in, save it now rather than asking them to
+        // press "save" again — the whole point of writing-first is that nothing gets lost.
+        if (editorValue.trim()) {
+          try {
+            const entryResponse = await fetch(`${API_BASE_URL}/api/journal/entries`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.access_token}` },
+              body: JSON.stringify({ content: editorValue, mood, status: 'draft' }),
+            });
+            if (entryResponse.ok) {
+              const entryData = await entryResponse.json();
+              setEntries((current) => [mapEntryToViewModel(entryData), ...current]);
+              setEditorValue('');
+              showToast(`Welcome, ${profile.display_name} — your entry is saved`);
+            } else {
+              showToast(`Welcome back, ${profile.display_name}`);
+            }
+          } catch {
+            showToast(`Welcome back, ${profile.display_name}`);
+          }
+        } else {
+          showToast(`Welcome back, ${profile.display_name}`);
+        }
       } else {
         setAuthMode('login');
         setPassword('');
@@ -796,11 +970,25 @@ export default function HomePage() {
         </section>
 
         <section className="editor-wrap">
-          {!token ? (
+          {!token && !showSavePrompt ? (
+            <div className="auth-card" style={{ paddingBottom: 10 }}>
+              <div className="auth-card-head">
+                <h3>Just write — there's nothing to fill in first</h3>
+                <p className="auth-card-sub">
+                  Ask for a reflection any time. When you want to keep what you write,{' '}
+                  <button type="button" className="text-link" style={{ display: 'inline', padding: 0 }} onClick={() => setShowSavePrompt(true)}>
+                    sign in or create an account
+                  </button>.
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          {!token && showSavePrompt ? (
             <form className="auth-card" onSubmit={handleAuth}>
               <div className="auth-card-head">
-                <h3>{authMode === 'login' ? 'Sign in to save entries' : 'Create an account'}</h3>
-                <p className="auth-card-sub">{authMode === 'login' ? 'Your entries stay private to your account.' : 'Takes a few seconds — no email confirmation needed.'}</p>
+                <h3>{authMode === 'login' ? 'Sign in to save this' : 'Create an account to save this'}</h3>
+                <p className="auth-card-sub">{authMode === 'login' ? 'Your entries stay private to your account.' : 'Takes a few seconds — what you wrote will be saved automatically.'}</p>
               </div>
               {authMessage ? (
                 <p className={`auth-message ${authMessage.startsWith('Account created') ? 'is-success' : 'is-error'}`} role="status">{authMessage}</p>
@@ -823,6 +1011,9 @@ export default function HomePage() {
                 <button className="ghost-btn" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthMessage(''); }} disabled={isAuthSubmitting}>
                   {authMode === 'login' ? 'Create account' : 'Back to sign in'}
                 </button>
+                <button className="ghost-btn" type="button" onClick={() => setShowSavePrompt(false)} disabled={isAuthSubmitting}>
+                  Keep writing
+                </button>
                 <button className="solid-btn" type="submit" disabled={isAuthSubmitting}>
                   {isAuthSubmitting ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Register'}
                 </button>
@@ -842,6 +1033,15 @@ export default function HomePage() {
             </div>
           </div>
         </section>
+
+        {!token && reflections.draft?.status === 'done' && showSavePrompt === false ? (
+          <div className="anon-save-prompt" role="note">
+            <p><strong>Want to keep this?</strong> Create a free account and this entry will be saved.</p>
+            <div className="anon-save-prompt-actions">
+              <button className="solid-btn" onClick={() => setShowSavePrompt(true)}>Save this entry</button>
+            </div>
+          </div>
+        ) : null}
 
         <ReflectionCard state={reflections.draft} />
 
@@ -1097,7 +1297,7 @@ export default function HomePage() {
             <span className="eyebrow">Mental model</span>
             <h1 className="page-title">A map of what's moving through you</h1>
           </div>
-          {token && (
+          {token && mentalModelStatus?.unlocked && (
             <button className="solid-btn" onClick={loadMentalModel} disabled={isMentalModelLoading}>
               {isMentalModelLoading ? 'Building…' : mentalModel ? 'Rebuild map' : 'Build my map'}
             </button>
@@ -1114,7 +1314,51 @@ export default function HomePage() {
           </div>
         )}
 
-        {token && !mentalModel && !isMentalModelLoading && !mentalModelError && (
+        {token && !mentalModelStatus && (
+          <div className="mental-model-loading">
+            <div className="mental-model-spinner" />
+          </div>
+        )}
+
+        {token && mentalModelStatus && !mentalModelStatus.unlocked && (
+          <div className="analysis-gate">
+            <svg viewBox="0 0 64 64" fill="none" className="analysis-gate-icon">
+              <circle cx="32" cy="32" r="8" stroke="#C9A893" strokeWidth="1.5" />
+              <circle cx="12" cy="16" r="5" stroke="#C9A893" strokeWidth="1.2" />
+              <circle cx="52" cy="16" r="5" stroke="#C9A893" strokeWidth="1.2" />
+              <circle cx="12" cy="48" r="5" stroke="#C9A893" strokeWidth="1.2" />
+              <circle cx="52" cy="48" r="5" stroke="#C9A893" strokeWidth="1.2" />
+              <path d="M17 19l11 10M36 25l11-9M17 45l11-10M36 39l11 9" stroke="#D8D2C4" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+            <p className="analysis-gate-title">
+              Write {mentalModelStatus.entries_remaining} more {mentalModelStatus.entries_remaining === 1 ? 'entry' : 'entries'} to unlock your mental model.
+            </p>
+            <div className="analysis-gate-progress">
+              <div className="analysis-gate-track">
+                <div
+                  className="analysis-gate-fill"
+                  style={{ width: `${Math.min(100, (mentalModelStatus.entries_total / mentalModelStatus.entries_required) * 100)}%` }}
+                />
+              </div>
+              <span className="analysis-gate-count">{mentalModelStatus.entries_total} of {mentalModelStatus.entries_required} entries</span>
+            </div>
+            <div className="analysis-gate-preview">
+              <div className="analysis-gate-preview-blur">
+                <div className="mental-model-node-card">
+                  <div className="mental-model-node-header">
+                    <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#E7DCCB', border: '1.5px solid #C9A893', flexShrink: 0 }} />
+                    <span className="mental-model-node-label">The quiet ache</span>
+                    <span className="mental-model-node-type">tension</span>
+                  </div>
+                  <p className="mental-model-node-desc">Something you've circled around in a few entries without quite naming.</p>
+                </div>
+              </div>
+              <div className="analysis-gate-preview-label">What it'll look like</div>
+            </div>
+          </div>
+        )}
+
+        {token && mentalModelStatus?.unlocked && !mentalModel && !isMentalModelLoading && !mentalModelError && (
           <div className="mental-model-empty">
             <svg viewBox="0 0 64 64" fill="none" className="mental-model-empty-icon">
               <circle cx="32" cy="32" r="8" stroke="#C9A893" strokeWidth="1.5" />
@@ -1125,9 +1369,6 @@ export default function HomePage() {
               <path d="M17 19l11 10M36 25l11-9M17 45l11-10M36 39l11 9" stroke="#D8D2C4" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
             <p>Press "Build my map" to generate a diagram from your journal entries and conversations.</p>
-            {entries.length < 3 && (
-              <p className="mental-model-hint">Write at least a few entries first — the more you've written, the more accurate the map.</p>
-            )}
           </div>
         )}
 
@@ -1147,6 +1388,39 @@ export default function HomePage() {
 
         {mentalModel && !isMentalModelLoading && (
           <div className="mental-model-content">
+            {mentalModelStatus?.update_available && (
+              <div className="analysis-update-banner">
+                <p>You've written more since this was built — <strong>your map may have shifted.</strong></p>
+                <button className="ghost-btn" onClick={loadMentalModel} disabled={isMentalModelLoading}>Update now</button>
+              </div>
+            )}
+
+            {(() => {
+              const diff = diffMentalModels(previousMentalModel, mentalModel);
+              if (!diff) return null;
+              return (
+                <div className="analysis-diff">
+                  <p className="analysis-diff-title">Since last time</p>
+                  <ul className="analysis-diff-list">
+                    {diff.newcomers.map((n) => (
+                      <li key={`new-${n.id}`}><span>{n.label}</span> showed up for the first time.</li>
+                    ))}
+                    {diff.shifted.map((s) => (
+                      <li key={`shift-${s.label}`}>
+                        <span>{s.label}</span> moved from {s.from} to {s.to}{' '}
+                        <span className={s.to > s.from ? 'analysis-diff-up' : 'analysis-diff-down'}>
+                          ({s.to > s.from ? '↑' : '↓'} {Math.abs(s.to - s.from)})
+                        </span>
+                      </li>
+                    ))}
+                    {diff.faded.map((n) => (
+                      <li key={`faded-${n.id}`}><span>{n.label}</span> has faded from the picture.</li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
+
             <div className="mental-model-summary">
               <svg viewBox="0 0 20 20" fill="none" className="reflect-card-icon" style={{ flexShrink: 0, marginTop: 2 }}>
                 <path d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4L10 13.5l-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
@@ -1176,6 +1450,12 @@ export default function HomePage() {
                 })}
               </div>
             </div>
+
+            {mentalModel.created_at && (
+              <span className="analysis-meta">
+                Built {formatDate(new Date(mentalModel.created_at), { month: 'short', day: 'numeric' })} from {mentalModel.entry_count_at_build} {mentalModel.entry_count_at_build === 1 ? 'entry' : 'entries'}.
+              </span>
+            )}
           </div>
         )}
       </main>
@@ -1187,7 +1467,7 @@ export default function HomePage() {
             <span className="eyebrow">Psychological profile</span>
             <h1 className="page-title">A mirror, not a verdict</h1>
           </div>
-          {token && (
+          {token && psychProfileStatus?.unlocked && (
             <button className="solid-btn" onClick={loadPsychProfile} disabled={isPsychLoading}>
               {isPsychLoading ? 'Analysing…' : psychProfile ? 'Rebuild profile' : 'Build my profile'}
             </button>
@@ -1213,16 +1493,57 @@ export default function HomePage() {
           </div>
         )}
 
-        {token && !psychProfile && !isPsychLoading && !psychError && (
+        {token && !psychProfileStatus && (
+          <div className="mental-model-loading">
+            <div className="mental-model-spinner" />
+          </div>
+        )}
+
+        {token && psychProfileStatus && !psychProfileStatus.unlocked && (
+          <div className="analysis-gate">
+            <svg viewBox="0 0 64 64" fill="none" className="analysis-gate-icon">
+              <path d="M32 8C22 8 14 16 14 26c0 7 3.6 13.2 9.2 16.8V46h17.6v-3.2C46.4 39.2 50 33 50 26c0-10-8-18-18-18Z" stroke="#C9A893" strokeWidth="1.5" strokeLinejoin="round"/>
+              <path d="M24 54h16M27 46v8M37 46v8" stroke="#C9A893" strokeWidth="1.4" strokeLinecap="round"/>
+            </svg>
+            <p className="analysis-gate-title">
+              Write {psychProfileStatus.entries_remaining} more {psychProfileStatus.entries_remaining === 1 ? 'entry' : 'entries'} to unlock your psychological profile.
+            </p>
+            <div className="analysis-gate-progress">
+              <div className="analysis-gate-track">
+                <div
+                  className="analysis-gate-fill"
+                  style={{ width: `${Math.min(100, (psychProfileStatus.entries_total / psychProfileStatus.entries_required) * 100)}%` }}
+                />
+              </div>
+              <span className="analysis-gate-count">{psychProfileStatus.entries_total} of {psychProfileStatus.entries_required} entries</span>
+            </div>
+            <div className="analysis-gate-preview">
+              <div className="analysis-gate-preview-blur">
+                <div className="psych-trait-card">
+                  <div className="psych-trait-head">
+                    <div>
+                      <span className="psych-trait-label">Openness</span>
+                      <span className="psych-trait-desc">Curiosity, imagination, breadth of experience</span>
+                    </div>
+                    <span className="psych-trait-badge" style={{ background: '#B8D4C8' }}>High</span>
+                  </div>
+                  <div className="psych-bar-track">
+                    <div className="psych-bar-fill" style={{ width: '72%', background: '#B8D4C8' }} />
+                  </div>
+                </div>
+              </div>
+              <div className="analysis-gate-preview-label">What it'll look like</div>
+            </div>
+          </div>
+        )}
+
+        {token && psychProfileStatus?.unlocked && !psychProfile && !isPsychLoading && !psychError && (
           <div className="mental-model-empty">
             <svg viewBox="0 0 64 64" fill="none" className="mental-model-empty-icon">
               <path d="M32 8C22 8 14 16 14 26c0 7 3.6 13.2 9.2 16.8V46h17.6v-3.2C46.4 39.2 50 33 50 26c0-10-8-18-18-18Z" stroke="#C9A893" strokeWidth="1.5" strokeLinejoin="round"/>
               <path d="M24 54h16M27 46v8M37 46v8" stroke="#C9A893" strokeWidth="1.4" strokeLinecap="round"/>
             </svg>
             <p>Press "Build my profile" to generate a psychological profile from your journal entries and conversations.</p>
-            {entries.length < 3 && (
-              <p className="mental-model-hint">Write at least a few entries first — the more you've written, the more accurate the profile.</p>
-            )}
           </div>
         )}
 
@@ -1242,6 +1563,34 @@ export default function HomePage() {
 
         {psychProfile && !isPsychLoading && (
           <div className="psych-content">
+
+            {psychProfileStatus?.update_available && (
+              <div className="analysis-update-banner">
+                <p>You've written more since this was built — <strong>your profile may have shifted.</strong></p>
+                <button className="ghost-btn" onClick={loadPsychProfile} disabled={isPsychLoading}>Update now</button>
+              </div>
+            )}
+
+            {(() => {
+              const diff = diffPsychProfiles(previousPsychProfile, psychProfile);
+              if (!diff) return null;
+              const dimLabels = { openness: 'Openness', conscientiousness: 'Conscientiousness', extraversion: 'Extraversion', agreeableness: 'Agreeableness', neuroticism: 'Neuroticism' };
+              return (
+                <div className="analysis-diff">
+                  <p className="analysis-diff-title">Since last time</p>
+                  <ul className="analysis-diff-list">
+                    {diff.shifts.map((s) => (
+                      <li key={s.dim}>
+                        <span>{dimLabels[s.dim]}</span> moved from {s.from} to {s.to}{' '}
+                        <span className={s.to > s.from ? 'analysis-diff-up' : 'analysis-diff-down'}>
+                          ({s.to > s.from ? '↑' : '↓'} {Math.abs(s.to - s.from)})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })()}
 
             {/* Overall narrative */}
             <div className="mental-model-summary">
@@ -1344,6 +1693,12 @@ export default function HomePage() {
                 </section>
               )}
             </div>
+
+            {psychProfile.created_at && (
+              <span className="analysis-meta">
+                Built {formatDate(new Date(psychProfile.created_at), { month: 'short', day: 'numeric' })} from {psychProfile.entry_count_at_build} {psychProfile.entry_count_at_build === 1 ? 'entry' : 'entries'}.
+              </span>
+            )}
 
           </div>
         )}
