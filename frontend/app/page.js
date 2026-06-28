@@ -392,6 +392,64 @@ function BrainDiagram({ nodes, edges }) {
   );
 }
 
+// ─── Auth Form (shared between the write-page save prompt and the account modal) ──────────────
+
+function AuthForm({
+  authMode,
+  setAuthMode,
+  email,
+  setEmail,
+  password,
+  setPassword,
+  displayName,
+  setDisplayName,
+  authMessage,
+  setAuthMessage,
+  isAuthSubmitting,
+  onSubmit,
+  heading,
+  subheading,
+  onCancel,
+  cancelLabel = 'Cancel',
+}) {
+  return (
+    <form className="auth-card" onSubmit={onSubmit}>
+      <div className="auth-card-head">
+        <h3>{heading}</h3>
+        <p className="auth-card-sub">{subheading}</p>
+      </div>
+      {authMessage ? (
+        <p className={`auth-message ${authMessage.startsWith('Account created') ? 'is-success' : 'is-error'}`} role="status">{authMessage}</p>
+      ) : null}
+      {authMode === 'register' ? (
+        <label className="auth-field">
+          <span>Display name</span>
+          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" autoComplete="name" />
+        </label>
+      ) : null}
+      <label className="auth-field">
+        <span>Email</span>
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required />
+      </label>
+      <label className="auth-field">
+        <span>Password</span>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={authMode === 'register' ? 'At least 8 characters' : 'Your password'} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} minLength={authMode === 'register' ? 8 : undefined} required />
+      </label>
+      <div className="editor-actions auth-card-actions">
+        <button className="ghost-btn" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthMessage(''); }} disabled={isAuthSubmitting}>
+          {authMode === 'login' ? 'Create account' : 'Back to sign in'}
+        </button>
+        <button className="ghost-btn" type="button" onClick={onCancel} disabled={isAuthSubmitting}>
+          {cancelLabel}
+        </button>
+        <button className="solid-btn" type="submit" disabled={isAuthSubmitting}>
+          {isAuthSubmitting ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Register'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 // ─── Main App ───────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
@@ -415,6 +473,20 @@ export default function HomePage() {
   const [expandedEntryId, setExpandedEntryId] = useState(null);
   const [reflections, setReflections] = useState({});
   const [showSavePrompt, setShowSavePrompt] = useState(false);
+
+  // Account rail (bottom-left) — dropdown menu and the modal it opens for sign in/up
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const accountMenuRef = useRef(null);
+
+  // Deletion in-flight trackers, so the relevant row can show a "Deleting…" state and disable itself
+  const [deletingEntryId, setDeletingEntryId] = useState(null);
+  const [deletingSessionId, setDeletingSessionId] = useState(null);
+
+  // "Click once to arm, click again to confirm" state for delete buttons — avoids a separate
+  // confirmation modal per row while still preventing one-click accidental deletion.
+  const [confirmDeleteEntryId, setConfirmDeleteEntryId] = useState(null);
+  const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState(null);
 
   // Chat state
   const [chatMessages, setChatMessages] = useState([]);
@@ -459,6 +531,18 @@ export default function HomePage() {
       chatBottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatMessages, isChatLoading]);
+
+  // Close the account dropdown when clicking anywhere outside it.
+  useEffect(() => {
+    if (!showAccountMenu) return;
+    const handleClickOutside = (event) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(event.target)) {
+        setShowAccountMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showAccountMenu]);
 
   const showToast = (message, duration = 2200) => {
     setActionLabel(message);
@@ -538,6 +622,31 @@ export default function HomePage() {
       showToast('Unable to load conversation');
     } finally {
       setLoadingSessionId(null);
+    }
+  };
+
+  const deleteChatSession = async (sessionId) => {
+    if (!token) return;
+    setDeletingSessionId(sessionId);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.status === 401) { clearAuth(); showToast('Your session expired — please sign in again'); return; }
+      if (!response.ok && response.status !== 404) throw new Error();
+      setChatSessions((current) => current.filter((s) => s.session_id !== sessionId));
+      // If the conversation currently open in the chat view is the one we just deleted,
+      // clear it out so the user isn't left looking at a "live" view of a deleted session.
+      if (currentSessionId === sessionId) {
+        setChatMessages([]);
+        setCurrentSessionId(null);
+      }
+      showToast('Conversation deleted');
+    } catch {
+      showToast('Unable to delete conversation');
+    } finally {
+      setDeletingSessionId(null);
     }
   };
 
@@ -726,6 +835,8 @@ export default function HomePage() {
     setPsychProfile(null);
     setPreviousPsychProfile(null);
     setPsychProfileStatus(null);
+    setShowAccountMenu(false);
+    setShowAccountModal(false);
     window.localStorage.removeItem('neurotwin-token');
     window.localStorage.removeItem('neurotwin-user');
   };
@@ -818,6 +929,26 @@ export default function HomePage() {
     submitEntry('closed');
   };
 
+  const deleteEntry = async (entryId) => {
+    if (!token) return;
+    setDeletingEntryId(entryId);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/journal/entries/${entryId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.status === 401) { clearAuth(); showToast('Your session expired — please sign in again'); return; }
+      if (!response.ok && response.status !== 404) throw new Error();
+      setEntries((current) => current.filter((e) => e.id !== entryId));
+      if (expandedEntryId === entryId) setExpandedEntryId(null);
+      showToast('Entry deleted');
+    } catch {
+      showToast('Unable to delete entry');
+    } finally {
+      setDeletingEntryId(null);
+    }
+  };
+
   const handleAuth = async (event) => {
     event.preventDefault();
     if (!email.trim() || !password.trim()) { setAuthMessage('Email and password are required'); return; }
@@ -848,6 +979,7 @@ export default function HomePage() {
         window.localStorage.setItem('neurotwin-user', JSON.stringify(profile));
         setPassword('');
         setShowSavePrompt(false);
+        setShowAccountModal(false);
 
         // If they wrote something before signing in, save it now rather than asking them to
         // press "save" again — the whole point of writing-first is that nothing gets lost.
@@ -931,15 +1063,91 @@ export default function HomePage() {
             <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.3" stroke="currentColor" strokeWidth="1.3" /><path d="M10 11.2v-.4c0-.7.4-1 .95-1.4.6-.4 1-.85 1-1.6 0-1-.85-1.8-1.95-1.8s-1.95.8-1.95 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /><circle cx="10" cy="13.7" r="0.15" fill="currentColor" stroke="currentColor" strokeWidth="0.9" /></svg>
             If you need support
           </button>
-          <div className="rail-profile">
-            <div className="avatar">{user ? user.display_name?.[0]?.toUpperCase() || 'U' : 'U'}</div>
-            <div className="rail-profile-text">
-              <span className="rail-profile-name">{user ? user.display_name : 'Guest'}</span>
-              <span className="rail-profile-streak">{token ? 'Signed in' : 'Sign in to save'}</span>
-            </div>
+          <div className="rail-profile-wrap" ref={accountMenuRef}>
+            <button
+              type="button"
+              className="rail-profile"
+              onClick={() => setShowAccountMenu((current) => !current)}
+              aria-haspopup="menu"
+              aria-expanded={showAccountMenu}
+            >
+              <div className="avatar">{user ? user.display_name?.[0]?.toUpperCase() || 'U' : 'U'}</div>
+              <div className="rail-profile-text">
+                <span className="rail-profile-name">{user ? user.display_name : 'Guest'}</span>
+                <span className="rail-profile-streak">{token ? 'Signed in' : 'Sign in to save'}</span>
+              </div>
+            </button>
+
+            {showAccountMenu ? (
+              <div className="account-menu" role="menu">
+                {token ? (
+                  <>
+                    <div className="account-menu-info">
+                      <span className="account-menu-name">{user?.display_name}</span>
+                      <span className="account-menu-email">{user?.email}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="account-menu-item account-menu-item-danger"
+                      role="menuitem"
+                      onClick={() => { setShowAccountMenu(false); handleLogout(); }}
+                    >
+                      Log out
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="account-menu-item"
+                      role="menuitem"
+                      onClick={() => { setAuthMode('login'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
+                    >
+                      Sign in
+                    </button>
+                    <button
+                      type="button"
+                      className="account-menu-item"
+                      role="menuitem"
+                      onClick={() => { setAuthMode('register'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
+                    >
+                      Create account
+                    </button>
+                  </>
+                )}
+              </div>
+            ) : null}
           </div>
         </div>
       </aside>
+
+      {showAccountModal ? (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Sign in or create an account" onClick={(e) => { if (e.target === e.currentTarget) setShowAccountModal(false); }}>
+          <div className="modal-card">
+            <button type="button" className="modal-close" aria-label="Close" onClick={() => setShowAccountModal(false)}>
+              <svg viewBox="0 0 16 16" fill="none"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+            </button>
+            <AuthForm
+              authMode={authMode}
+              setAuthMode={setAuthMode}
+              email={email}
+              setEmail={setEmail}
+              password={password}
+              setPassword={setPassword}
+              displayName={displayName}
+              setDisplayName={setDisplayName}
+              authMessage={authMessage}
+              setAuthMessage={setAuthMessage}
+              isAuthSubmitting={isAuthSubmitting}
+              onSubmit={handleAuth}
+              heading={authMode === 'login' ? 'Sign in to Quietly' : 'Create your account'}
+              subheading={authMode === 'login' ? 'Welcome back.' : 'Takes a few seconds — your entries stay private to your account.'}
+              onCancel={() => setShowAccountModal(false)}
+              cancelLabel="Cancel"
+            />
+          </div>
+        </div>
+      ) : null}
 
       {/* ── Write ── */}
       <main className={`page ${activeView === 'write' ? '' : 'is-hidden'}`} id="view-write">
@@ -985,40 +1193,24 @@ export default function HomePage() {
           ) : null}
 
           {!token && showSavePrompt ? (
-            <form className="auth-card" onSubmit={handleAuth}>
-              <div className="auth-card-head">
-                <h3>{authMode === 'login' ? 'Sign in to save this' : 'Create an account to save this'}</h3>
-                <p className="auth-card-sub">{authMode === 'login' ? 'Your entries stay private to your account.' : 'Takes a few seconds — what you wrote will be saved automatically.'}</p>
-              </div>
-              {authMessage ? (
-                <p className={`auth-message ${authMessage.startsWith('Account created') ? 'is-success' : 'is-error'}`} role="status">{authMessage}</p>
-              ) : null}
-              {authMode === 'register' ? (
-                <label className="auth-field">
-                  <span>Display name</span>
-                  <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="What should we call you?" autoComplete="name" />
-                </label>
-              ) : null}
-              <label className="auth-field">
-                <span>Email</span>
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required />
-              </label>
-              <label className="auth-field">
-                <span>Password</span>
-                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={authMode === 'register' ? 'At least 8 characters' : 'Your password'} autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} minLength={authMode === 'register' ? 8 : undefined} required />
-              </label>
-              <div className="editor-actions auth-card-actions">
-                <button className="ghost-btn" type="button" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthMessage(''); }} disabled={isAuthSubmitting}>
-                  {authMode === 'login' ? 'Create account' : 'Back to sign in'}
-                </button>
-                <button className="ghost-btn" type="button" onClick={() => setShowSavePrompt(false)} disabled={isAuthSubmitting}>
-                  Keep writing
-                </button>
-                <button className="solid-btn" type="submit" disabled={isAuthSubmitting}>
-                  {isAuthSubmitting ? 'Please wait…' : authMode === 'login' ? 'Sign in' : 'Register'}
-                </button>
-              </div>
-            </form>
+            <AuthForm
+              authMode={authMode}
+              setAuthMode={setAuthMode}
+              email={email}
+              setEmail={setEmail}
+              password={password}
+              setPassword={setPassword}
+              displayName={displayName}
+              setDisplayName={setDisplayName}
+              authMessage={authMessage}
+              setAuthMessage={setAuthMessage}
+              isAuthSubmitting={isAuthSubmitting}
+              onSubmit={handleAuth}
+              heading={authMode === 'login' ? 'Sign in to save this' : 'Create an account to save this'}
+              subheading={authMode === 'login' ? 'Your entries stay private to your account.' : 'Takes a few seconds — what you wrote will be saved automatically.'}
+              onCancel={() => setShowSavePrompt(false)}
+              cancelLabel="Keep writing"
+            />
           ) : null}
           <textarea className="editor" id="editor" value={editorValue} onChange={(e) => setEditorValue(e.target.value)} placeholder="Start anywhere. A sentence, a list, a complaint, a single word — it all counts." aria-label="Journal entry" />
           <div className="editor-foot">
@@ -1082,7 +1274,7 @@ export default function HomePage() {
             const reflectionKey = `entry-${entry.id}`;
             return (
               <div key={entry.id}>
-                <button type="button" className={`entry-row ${isExpanded ? 'is-expanded' : ''}`} onClick={() => setExpandedEntryId(isExpanded ? null : entry.id)} aria-expanded={isExpanded}>
+                <button type="button" className={`entry-row ${isExpanded ? 'is-expanded' : ''}`} onClick={() => { setExpandedEntryId(isExpanded ? null : entry.id); setConfirmDeleteEntryId(null); }} aria-expanded={isExpanded}>
                   <div className="entry-date"><strong>{dateStr}</strong>{weekday}</div>
                   <div className="entry-mood-mark" style={{ background: MOOD_COLORS[entry.mood] }} title={MOOD_LABELS[entry.mood]} />
                   <div className="entry-body">
@@ -1098,6 +1290,26 @@ export default function HomePage() {
                       <button type="button" className="ghost-btn" onClick={() => requestReflection(reflectionKey, entry.snippet)} disabled={reflections[reflectionKey]?.status === 'loading'}>
                         {reflections[reflectionKey]?.status === 'loading' ? 'Reflecting…' : 'Reflect on this entry'}
                       </button>
+                      <button
+                        type="button"
+                        className={`ghost-btn ghost-btn-danger ${confirmDeleteEntryId === entry.id ? 'is-armed' : ''}`}
+                        disabled={deletingEntryId === entry.id}
+                        onClick={() => {
+                          if (confirmDeleteEntryId === entry.id) {
+                            setConfirmDeleteEntryId(null);
+                            deleteEntry(entry.id);
+                          } else {
+                            setConfirmDeleteEntryId(entry.id);
+                          }
+                        }}
+                      >
+                        {deletingEntryId === entry.id ? 'Deleting…' : confirmDeleteEntryId === entry.id ? 'Click to confirm' : 'Delete entry'}
+                      </button>
+                      {confirmDeleteEntryId === entry.id ? (
+                        <button type="button" className="text-link" onClick={() => setConfirmDeleteEntryId(null)}>
+                          Cancel
+                        </button>
+                      ) : null}
                     </div>
                     <ReflectionCard state={reflections[reflectionKey]} />
                   </div>
@@ -1204,25 +1416,50 @@ export default function HomePage() {
             ) : (
               <div className="entry-list">
                 {chatSessions.map((session) => (
-                  <button
-                    key={session.session_id}
-                    type="button"
-                    className="entry-row"
-                    onClick={() => loadChatSession(session.session_id)}
-                    disabled={loadingSessionId === session.session_id}
-                  >
-                    <div className="entry-date">
-                      <strong>{formatDate(session.started_at, { month: 'short', day: 'numeric' })}</strong>
-                      {formatDate(session.started_at, { weekday: 'short' })}
-                    </div>
-                    <div className="entry-body">
-                      <p className="entry-snippet">{session.preview || 'No preview available'}</p>
-                      <span className="entry-meta">{session.message_count} messages</span>
-                    </div>
-                    <div className="entry-save">
-                      {loadingSessionId === session.session_id ? 'Loading…' : '→'}
-                    </div>
-                  </button>
+                  <div key={session.session_id} className="session-row-wrap">
+                    <button
+                      type="button"
+                      className="entry-row session-row"
+                      onClick={() => loadChatSession(session.session_id)}
+                      disabled={loadingSessionId === session.session_id || deletingSessionId === session.session_id}
+                    >
+                      <div className="entry-date">
+                        <strong>{formatDate(session.started_at, { month: 'short', day: 'numeric' })}</strong>
+                        {formatDate(session.started_at, { weekday: 'short' })}
+                      </div>
+                      <div className="entry-body">
+                        <p className="entry-snippet">{session.preview || 'No preview available'}</p>
+                        <span className="entry-meta">{session.message_count} messages</span>
+                      </div>
+                      <div className="entry-save">
+                        {loadingSessionId === session.session_id ? 'Loading…' : '→'}
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className={`session-delete-btn ${confirmDeleteSessionId === session.session_id ? 'is-armed' : ''}`}
+                      disabled={deletingSessionId === session.session_id}
+                      aria-label={confirmDeleteSessionId === session.session_id ? 'Click to confirm deletion' : 'Delete conversation'}
+                      title={confirmDeleteSessionId === session.session_id ? 'Click to confirm deletion' : 'Delete conversation'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirmDeleteSessionId === session.session_id) {
+                          setConfirmDeleteSessionId(null);
+                          deleteChatSession(session.session_id);
+                        } else {
+                          setConfirmDeleteSessionId(session.session_id);
+                        }
+                      }}
+                    >
+                      {deletingSessionId === session.session_id ? (
+                        '…'
+                      ) : confirmDeleteSessionId === session.session_id ? (
+                        'Confirm?'
+                      ) : (
+                        <svg viewBox="0 0 16 16" fill="none"><path d="M3.5 5h9M6.5 5V3.6c0-.5.4-.9.9-.9h1.2c.5 0 .9.4.9.9V5M5 5l.5 7.4c0 .6.5 1.1 1.1 1.1h2.8c.6 0 1.1-.5 1.1-1.1L11 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                      )}
+                    </button>
+                  </div>
                 ))}
               </div>
             )}

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import uuid
@@ -18,14 +19,36 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 load_dotenv()
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("quietly")
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./neurotwin.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 7)))
 
+if SECRET_KEY == "dev-secret-key":
+    logger.warning(
+        "SECRET_KEY is using the insecure default value. Set a long random SECRET_KEY "
+        "in your environment before deploying to production."
+    )
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_DEFAULT_MODEL", "anthropic/claude-haiku-4.5")
+
+# CORS — comma-separated list of exact origins allowed to call this API, plus an optional regex
+# for pattern-based origins (e.g. preview deployments). Both default to local dev origins only;
+# set CORS_ALLOWED_ORIGINS / CORS_ALLOWED_ORIGIN_REGEX in production to your real frontend domain(s).
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
+CORS_ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOWED_ORIGIN_REGEX", r"https://.*\.app\.github\.dev")
 
 REFLECTION_SYSTEM_PROMPT = """You are a calm, observing listener inside a private journaling app called Quietly.
 Someone has just shared a journal entry with you. Your role is to help them reflect — not to diagnose, treat, \
@@ -225,8 +248,8 @@ app = FastAPI(title="Quietly API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_origin_regex=r"https://.*\.app\.github\.dev",
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_origin_regex=CORS_ALLOWED_ORIGIN_REGEX or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -441,28 +464,54 @@ def get_current_user_optional(
     return db.query(User).filter(User.email == email).first()
 
 
-# Simple in-memory rate limit for anonymous (unauthenticated) AI calls. This is intentionally lightweight —
-# it resets if the server restarts and isn't shared across multiple server processes — but it's enough to
-# stop casual abuse of the anonymous reflection endpoint without adding new infrastructure (e.g. Redis).
-# Signed-in users are not affected by this limiter.
+# Simple in-memory rate limiter, keyed by (bucket, client IP). This is intentionally lightweight —
+# it resets on restart and isn't shared across multiple server processes — but it's enough to slow
+# down casual abuse without adding new infrastructure (e.g. Redis). For a multi-process production
+# deployment, swap this for a shared store (Redis, etc.) keyed the same way.
+_rate_limit_hits: dict[str, list[float]] = {}
+
+
+def enforce_rate_limit(request: Request, bucket: str, limit: int, window_seconds: int, message: str) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{bucket}:{client_ip}"
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - window_seconds
+
+    hits = [t for t in _rate_limit_hits.get(key, []) if t > cutoff]
+    if len(hits) >= limit:
+        raise HTTPException(status_code=429, detail=message)
+    hits.append(now)
+    _rate_limit_hits[key] = hits
+
+
 ANON_REFLECT_LIMIT = 5
 ANON_REFLECT_WINDOW_SECONDS = 60 * 60  # 1 hour
-_anon_reflect_hits: dict[str, list[float]] = {}
 
 
 def enforce_anon_rate_limit(request: Request) -> None:
-    client_ip = request.client.host if request.client else "unknown"
-    now = datetime.now(timezone.utc).timestamp()
-    cutoff = now - ANON_REFLECT_WINDOW_SECONDS
+    enforce_rate_limit(
+        request,
+        bucket="anon_reflect",
+        limit=ANON_REFLECT_LIMIT,
+        window_seconds=ANON_REFLECT_WINDOW_SECONDS,
+        message="You've used up your free reflections for now. Create a free account to keep going.",
+    )
 
-    hits = [t for t in _anon_reflect_hits.get(client_ip, []) if t > cutoff]
-    if len(hits) >= ANON_REFLECT_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail="You've used up your free reflections for now. Create a free account to keep going.",
-        )
-    hits.append(now)
-    _anon_reflect_hits[client_ip] = hits
+
+# Login/register are brute-force/credential-stuffing targets, so they get their own (more generous,
+# since real users mistype passwords) per-IP limit. Signed-in routes are unaffected.
+AUTH_ATTEMPT_LIMIT = 20
+AUTH_ATTEMPT_WINDOW_SECONDS = 60 * 10  # 10 minutes
+
+
+def enforce_auth_rate_limit(request: Request) -> None:
+    enforce_rate_limit(
+        request,
+        bucket="auth",
+        limit=AUTH_ATTEMPT_LIMIT,
+        window_seconds=AUTH_ATTEMPT_WINDOW_SECONDS,
+        message="Too many attempts. Please wait a few minutes and try again.",
+    )
 
 
 async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -> tuple[str, str]:
@@ -483,7 +532,7 @@ async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -
     if response.status_code == 402:
         raise HTTPException(status_code=502, detail="The server's OpenRouter account is out of credits")
     if response.status_code >= 400:
-        print(f"OpenRouter error {response.status_code}: {response.text}")
+        logger.error("OpenRouter error %s: %s", response.status_code, response.text)
         raise HTTPException(status_code=502, detail="OpenRouter could not complete the request")
 
     data = response.json()
@@ -516,7 +565,8 @@ def health_check():
 # Auth
 
 @app.post("/api/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
+def register_user(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    enforce_auth_rate_limit(request)
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -525,11 +575,13 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    logger.info("New user registered: %s", user.email)
     return UserResponse(id=user.id, email=user.email, display_name=user.display_name)
 
 
 @app.post("/api/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    enforce_auth_rate_limit(request)
     user = db.query(User).filter(User.email == str(payload.email)).first()
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -561,6 +613,20 @@ def create_entry(payload: JournalEntryCreate, current_user: CurrentUser, db: Ses
     db.commit()
     db.refresh(entry)
     return JournalEntryResponse(id=entry.id, content=entry.content, mood=entry.mood, status=entry.status, created_at=entry.created_at)
+
+
+@app.delete("/api/journal/entries/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_entry(entry_id: int, current_user: CurrentUser, db: Session = Depends(get_db)):
+    entry = (
+        db.query(JournalEntry)
+        .filter(JournalEntry.id == entry_id, JournalEntry.user_id == current_user.id)
+        .first()
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    db.delete(entry)
+    db.commit()
+    return None
 
 
 # AI — Reflect
@@ -680,6 +746,21 @@ def get_chat_session(session_id: str, current_user: CurrentUser, db: Session = D
             for m in messages
         ],
     )
+
+
+@app.delete("/api/chat/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_chat_session(session_id: str, current_user: CurrentUser, db: Session = Depends(get_db)):
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == current_user.id, ChatMessage.session_id == session_id)
+        .all()
+    )
+    if not messages:
+        raise HTTPException(status_code=404, detail="Session not found")
+    for message in messages:
+        db.delete(message)
+    db.commit()
+    return None
 
 
 # AI — Mental Model (journals + chats)

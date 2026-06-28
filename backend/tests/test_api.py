@@ -173,3 +173,122 @@ def test_mental_model_gated_until_enough_entries(client, monkeypatch):
     # Now unlocked, so the gate no longer blocks it — it should fail later in the pipeline
     # (503, missing API key) rather than 403 (gate).
     assert build_response_2.status_code == 503
+
+
+def test_delete_journal_entry(client):
+    register_response = client.post(
+        "/api/auth/register",
+        json={"email": "deleter@example.com", "password": "secret123", "display_name": "Deleter"},
+    )
+    assert register_response.status_code == 201
+    login_response = client.post("/api/auth/login", json={"email": "deleter@example.com", "password": "secret123"})
+    token = login_response.json()["access_token"]
+    auth_headers = {"Authorization": f"Bearer {token}"}
+
+    create_response = client.post(
+        "/api/journal/entries",
+        headers=auth_headers,
+        json={"content": "An entry to be deleted.", "mood": 3, "status": "closed"},
+    )
+    assert create_response.status_code == 201
+    entry_id = create_response.json()["id"]
+
+    entries_before = client.get("/api/journal/entries", headers=auth_headers).json()["entries"]
+    assert any(e["id"] == entry_id for e in entries_before)
+
+    delete_response = client.delete(f"/api/journal/entries/{entry_id}", headers=auth_headers)
+    assert delete_response.status_code == 204
+
+    entries_after = client.get("/api/journal/entries", headers=auth_headers).json()["entries"]
+    assert not any(e["id"] == entry_id for e in entries_after)
+
+    # Deleting again (or an entry that never existed) should 404, not silently succeed.
+    second_delete = client.delete(f"/api/journal/entries/{entry_id}", headers=auth_headers)
+    assert second_delete.status_code == 404
+
+
+def test_delete_journal_entry_requires_ownership(client):
+    register_a = client.post(
+        "/api/auth/register",
+        json={"email": "owner-a@example.com", "password": "secret123", "display_name": "Owner A"},
+    )
+    assert register_a.status_code == 201
+    token_a = client.post("/api/auth/login", json={"email": "owner-a@example.com", "password": "secret123"}).json()["access_token"]
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+
+    register_b = client.post(
+        "/api/auth/register",
+        json={"email": "owner-b@example.com", "password": "secret123", "display_name": "Owner B"},
+    )
+    assert register_b.status_code == 201
+    token_b = client.post("/api/auth/login", json={"email": "owner-b@example.com", "password": "secret123"}).json()["access_token"]
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    entry = client.post(
+        "/api/journal/entries",
+        headers=headers_a,
+        json={"content": "Owner A's private entry.", "mood": 3, "status": "closed"},
+    ).json()
+
+    # User B must not be able to delete user A's entry.
+    cross_delete = client.delete(f"/api/journal/entries/{entry['id']}", headers=headers_b)
+    assert cross_delete.status_code == 404
+
+    # The entry should still exist for user A afterwards.
+    entries_a = client.get("/api/journal/entries", headers=headers_a).json()["entries"]
+    assert any(e["id"] == entry["id"] for e in entries_a)
+
+
+def test_delete_chat_session(client, monkeypatch):
+    import main
+
+    register_response = client.post(
+        "/api/auth/register",
+        json={"email": "chatdeleter@example.com", "password": "secret123", "display_name": "ChatDeleter"},
+    )
+    assert register_response.status_code == 201
+    token = client.post("/api/auth/login", json={"email": "chatdeleter@example.com", "password": "secret123"}).json()["access_token"]
+    auth_headers = {"Authorization": f"Bearer {token}"}
+
+    monkeypatch.setattr(main, "OPENROUTER_API_KEY", "sk-or-fake-for-test")
+
+    async def fake_call_openrouter(messages, model, timeout=60):
+        return "A thoughtful reply.", model
+
+    monkeypatch.setattr(main, "call_openrouter", fake_call_openrouter)
+
+    chat_response = client.post(
+        "/api/ai/chat",
+        headers=auth_headers,
+        json={"messages": [{"role": "user", "content": "Hello there"}]},
+    )
+    assert chat_response.status_code == 200
+    session_id = chat_response.json()["session_id"]
+
+    sessions_before = client.get("/api/chat/sessions", headers=auth_headers).json()["sessions"]
+    assert any(s["session_id"] == session_id for s in sessions_before)
+
+    delete_response = client.delete(f"/api/chat/sessions/{session_id}", headers=auth_headers)
+    assert delete_response.status_code == 204
+
+    sessions_after = client.get("/api/chat/sessions", headers=auth_headers).json()["sessions"]
+    assert not any(s["session_id"] == session_id for s in sessions_after)
+
+    get_after_delete = client.get(f"/api/chat/sessions/{session_id}", headers=auth_headers)
+    assert get_after_delete.status_code == 404
+
+    second_delete = client.delete(f"/api/chat/sessions/{session_id}", headers=auth_headers)
+    assert second_delete.status_code == 404
+
+
+def test_auth_endpoints_are_rate_limited(client):
+    import main
+
+    statuses = []
+    for i in range(main.AUTH_ATTEMPT_LIMIT + 5):
+        r = client.post(
+            "/api/auth/login",
+            json={"email": "nobody@example.com", "password": "wrong-password"},
+        )
+        statuses.append(r.status_code)
+    assert 429 in statuses

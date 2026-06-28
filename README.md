@@ -10,11 +10,13 @@ No social features. No streaks. No gamification. Just a place to write — and, 
 
 **Write** — A blank page each day. Pick a mood (Heavy → Open), write whatever's there, and save as a draft or close the entry when done. A rotating prompt appears if you're not sure where to start.
 
+**Account** — The profile control in the bottom-left of the rail opens a menu to sign in, create an account, or log out. Signed-out visitors can write and reflect first; the prompt to create an account appears after that first reflection, with their writing already in hand.
+
 **Reflect** — After writing, ask for a reflection. The AI reads your entry and mirrors back what it notices — themes, emotions underneath the words, things you didn't quite say directly. No advice, no questions, no diagnosis. Just a quiet observation. Anonymous users get up to 5 free reflections per hour before being prompted to create an account.
 
-**Talk it out** — A proper back-and-forth conversation with an AI companion. Not a chatbot, not a therapist — a thoughtful presence that listens carefully, asks one good question at a time, and matches your energy. Every conversation is saved and accessible by session so you can pick up where you left off.
+**Talk it out** — A proper back-and-forth conversation with an AI companion. Not a chatbot, not a therapist — a thoughtful presence that listens carefully, asks one good question at a time, and matches your energy. Every conversation is saved and accessible by session so you can pick up where you left off, and any past conversation can be deleted.
 
-**Past entries** — Browse everything you've written. Filter by mood (heavy days, open days) or saved entries. Expand any entry to read the full text and request a reflection on it.
+**Past entries** — Browse everything you've written. Filter by mood (heavy days, open days) or saved entries. Expand any entry to read the full text, request a reflection on it, or delete it permanently.
 
 **Patterns** — A visual thread of your last 30 days, a bar chart of what time of day you write (computed from your actual entries), and a word cloud of words that recur across your writing (stopwords removed, minimum 2 occurrences).
 
@@ -118,6 +120,7 @@ App runs at `http://localhost:3000`.
 |--------|------|------|-------------|
 | GET | `/api/journal/entries` | ✅ | List all entries (newest first) |
 | POST | `/api/journal/entries` | ✅ | Create entry |
+| DELETE | `/api/journal/entries/{entry_id}` | ✅ | Delete an entry permanently (owner only) |
 
 ### AI
 
@@ -132,6 +135,7 @@ App runs at `http://localhost:3000`.
 |--------|------|------|-------------|
 | GET | `/api/chat/sessions` | ✅ | List all chat sessions (newest first, with preview) |
 | GET | `/api/chat/sessions/{session_id}` | ✅ | Full message history for a session |
+| DELETE | `/api/chat/sessions/{session_id}` | ✅ | Delete a conversation and all its messages permanently (owner only) |
 
 ### Mental model
 
@@ -207,10 +211,129 @@ All tables are created automatically on first run via `Base.metadata.create_all(
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter key |
-| `SECRET_KEY` | Yes (prod) | `dev-secret-key` | JWT signing secret — change this in production |
+| `SECRET_KEY` | Yes (prod) | `dev-secret-key` | JWT signing secret — change this in production. The server logs a warning at startup if left on the default. |
 | `DATABASE_URL` | No | `sqlite:///./neurotwin.db` | SQLAlchemy database URL |
 | `OPENROUTER_DEFAULT_MODEL` | No | `anthropic/claude-haiku-4.5` | Model for all AI features |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | `10080` (7 days) | JWT token expiry |
+| `CORS_ALLOWED_ORIGINS` | No (prod: yes) | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated list of exact frontend origins allowed to call the API |
+| `CORS_ALLOWED_ORIGIN_REGEX` | No | `https://.*\.app\.github\.dev` | Optional regex for pattern-based origins (e.g. preview deployments). Set empty to disable. |
+| `LOG_LEVEL` | No | `INFO` | Python logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+
+A `.env.example` is included in `backend/` — copy it to `.env` and fill in real values.
+
+---
+
+## Production deployment
+
+These steps assume a single Linux server (a VM, a droplet, an EC2 instance, etc.) running both the API and the built frontend. Adapt as needed for your platform of choice (Render, Railway, Fly.io, etc. all work fine with the same two services).
+
+### 1. Backend
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Create `backend/.env` (see `.env.example`) with at minimum:
+
+```env
+OPENROUTER_API_KEY=sk-or-...
+SECRET_KEY=<a long random string — e.g. `openssl rand -hex 32`>
+CORS_ALLOWED_ORIGINS=https://your-frontend-domain.com
+CORS_ALLOWED_ORIGIN_REGEX=
+DATABASE_URL=sqlite:////var/lib/quietly/neurotwin.db
+```
+
+Notes:
+- **Never reuse the default `SECRET_KEY`** — tokens signed with it are forgeable by anyone who reads this repo.
+- For SQLite in production, point `DATABASE_URL` at a path outside the app directory (e.g. `/var/lib/quietly/`) so it survives redeploys and isn't wiped by `git pull` / container rebuilds. For anything beyond a single small deployment, switch to Postgres (`postgresql://user:pass@host:5432/dbname` — install `psycopg2-binary` as well).
+- Run database backups regularly if you're storing real user data — there's no built-in backup mechanism.
+
+Run with a production ASGI setup (don't use `--reload` in prod):
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+For real deployments, put this behind a process manager (systemd, supervisor) and a reverse proxy (nginx, Caddy) that terminates TLS and forwards to port 8000. A minimal systemd unit:
+
+```ini
+[Unit]
+Description=Quietly API
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/quietly/backend
+Environment="PATH=/opt/quietly/backend/.venv/bin"
+EnvironmentFile=/opt/quietly/backend/.env
+ExecStart=/opt/quietly/backend/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 4
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> The in-memory rate limiter (login/register and anonymous reflections) resets on restart and isn't shared across multiple worker processes or machines. With `--workers 4`, each worker has its own counter, so the *effective* limit is roughly `limit × workers`. That's fine for a single small deployment; if you need accurate multi-process/multi-instance limiting, swap the in-memory dict in `main.py` for Redis (or similar) behind the same `enforce_rate_limit` function signature.
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+```
+
+Create `frontend/.env.production` (or set these as environment variables in your hosting platform):
+
+```env
+NEXT_PUBLIC_API_URL=https://api.your-domain.com
+```
+
+Build and run:
+
+```bash
+npm run build
+npm run start -- -H 0.0.0.0 -p 3000
+```
+
+Put this behind the same reverse proxy, on its own domain or path, with TLS termination handled by nginx/Caddy/your platform's load balancer.
+
+### 3. Reverse proxy (example: nginx)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-frontend-domain.com;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name api.your-domain.com;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+The `X-Real-IP`/`X-Forwarded-For` header matters here: the rate limiter keys off `request.client.host`, which behind a reverse proxy will be the proxy's own address unless nginx is configured to pass through the real client IP and the ASGI server (uvicorn, via `--proxy-headers` and `--forwarded-allow-ips`) is told to trust it. Without that, all traffic looks like it's coming from one IP and the rate limits become meaningless (either far too strict for everyone, or trivially shared).
+
+### 4. Pre-launch checklist
+
+- [ ] `SECRET_KEY` is a real random value, not the default
+- [ ] `CORS_ALLOWED_ORIGINS` is set to your real frontend domain(s) only
+- [ ] `OPENROUTER_API_KEY` is set and has credits
+- [ ] Database path is persistent and backed up (or you're on Postgres)
+- [ ] TLS is terminated in front of both services
+- [ ] `uvicorn --proxy-headers --forwarded-allow-ips=...` (or equivalent) is set if behind a reverse proxy, so rate limiting sees real client IPs
+- [ ] `npm run build` succeeds and `NEXT_PUBLIC_API_URL` points at the real API domain
+- [ ] Run `pytest` in `backend/` once more against the deployed config before going live
 
 ---
 
