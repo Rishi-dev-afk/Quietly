@@ -248,7 +248,7 @@ DATABASE_URL=sqlite:////var/lib/quietly/neurotwin.db
 
 Notes:
 - **Never reuse the default `SECRET_KEY`** — tokens signed with it are forgeable by anyone who reads this repo.
-- For SQLite in production, point `DATABASE_URL` at a path outside the app directory (e.g. `/var/lib/quietly/`) so it survives redeploys and isn't wiped by `git pull` / container rebuilds. For anything beyond a single small deployment, switch to Postgres (`postgresql://user:pass@host:5432/dbname` — install `psycopg2-binary` as well).
+- For SQLite in production, point `DATABASE_URL` at a path outside the app directory (e.g. `/var/lib/quietly/`) so it survives redeploys and isn't wiped by `git pull` / container rebuilds. For anything beyond a single small deployment, switch to Postgres (e.g. [Neon](https://neon.tech)'s free tier) by setting `DATABASE_URL=postgresql://user:pass@host/dbname?sslmode=require` — the `psycopg2-binary` driver is already included in `requirements.txt`, so no extra install step is needed.
 - Run database backups regularly if you're storing real user data — there's no built-in backup mechanism.
 
 Run with a production ASGI setup (don't use `--reload` in prod):

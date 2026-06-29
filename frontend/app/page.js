@@ -454,6 +454,13 @@ function AuthForm({
 
 export default function HomePage() {
   const [activeView, setActiveView] = useState('write');
+
+  // Navigate to a view and close the mobile nav drawer, if open — used by every nav link so the
+  // drawer doesn't linger open over the new view after a tap.
+  const goToView = (view) => {
+    setActiveView(view);
+    setShowMobileNav(false);
+  };
   const [activeFilter, setActiveFilter] = useState('all');
   const [mood, setMood] = useState(3);
   const [promptIndex, setPromptIndex] = useState(0);
@@ -478,6 +485,9 @@ export default function HomePage() {
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showAccountModal, setShowAccountModal] = useState(false);
   const accountMenuRef = useRef(null);
+
+  // Mobile nav drawer — the rail collapses into a top bar + slide-in menu below 760px
+  const [showMobileNav, setShowMobileNav] = useState(false);
 
   // Deletion in-flight trackers, so the relevant row can show a "Deleting…" state and disable itself
   const [deletingEntryId, setDeletingEntryId] = useState(null);
@@ -1020,7 +1030,42 @@ export default function HomePage() {
 
   return (
     <div className="app">
-      <aside className="rail">
+      <header className="mobile-topbar">
+        <button
+          type="button"
+          className="mobile-nav-toggle"
+          aria-label={showMobileNav ? 'Close menu' : 'Open menu'}
+          aria-expanded={showMobileNav}
+          onClick={() => setShowMobileNav((current) => !current)}
+        >
+          {showMobileNav ? (
+            <svg viewBox="0 0 20 20" fill="none"><path d="M4 4l12 12M16 4L4 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+          ) : (
+            <svg viewBox="0 0 20 20" fill="none"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+          )}
+        </button>
+        <div className="brand brand-mobile">
+          <svg className="brand-mark" viewBox="0 0 28 28" fill="none">
+            <path d="M4 14C4 14 7 6 14 6C21 6 24 14 24 14C24 14 21 22 14 22C7 22 4 14 4 14Z" stroke="currentColor" strokeWidth="1.4" />
+            <circle cx="14" cy="14" r="2.6" fill="currentColor" />
+          </svg>
+          <span>Quietly</span>
+        </div>
+        <button
+          type="button"
+          className="mobile-avatar-btn"
+          aria-label="Account"
+          onClick={() => { setShowMobileNav(false); setShowAccountMenu((current) => !current); }}
+        >
+          <div className="avatar avatar-sm">{user ? user.display_name?.[0]?.toUpperCase() || 'U' : 'U'}</div>
+        </button>
+      </header>
+
+      {showMobileNav ? (
+        <button type="button" className="mobile-nav-backdrop" aria-label="Close menu" onClick={() => setShowMobileNav(false)} />
+      ) : null}
+
+      <aside className={`rail ${showMobileNav ? 'is-open' : ''}`}>
         <div className="rail-top">
           <div className="brand">
             <svg className="brand-mark" viewBox="0 0 28 28" fill="none">
@@ -1032,38 +1077,38 @@ export default function HomePage() {
         </div>
 
         <nav className="rail-nav" aria-label="Primary">
-          <button type="button" className={`rail-link ${activeView === 'write' ? 'is-active' : ''}`} onClick={() => setActiveView('write')}>
+          <button type="button" className={`rail-link ${activeView === 'write' ? 'is-active' : ''}`} onClick={() => goToView('write')}>
             <svg viewBox="0 0 20 20" fill="none"><path d="M3 17.5h14M4 13.5l1-3.6L13.6 1.4a1.4 1.4 0 0 1 2 0l1 1a1.4 1.4 0 0 1 0 2L8 13l-4 .5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
             Write
           </button>
-          <button type="button" className={`rail-link ${activeView === 'entries' ? 'is-active' : ''}`} onClick={() => setActiveView('entries')}>
+          <button type="button" className={`rail-link ${activeView === 'entries' ? 'is-active' : ''}`} onClick={() => goToView('entries')}>
             <svg viewBox="0 0 20 20" fill="none"><rect x="3.5" y="2.5" width="13" height="15" rx="1.4" stroke="currentColor" strokeWidth="1.3" /><path d="M6.5 6.5h7M6.5 9.5h7M6.5 12.5h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>
             Past entries
           </button>
-          <button type="button" className={`rail-link ${activeView === 'patterns' ? 'is-active' : ''}`} onClick={() => setActiveView('patterns')}>
+          <button type="button" className={`rail-link ${activeView === 'patterns' ? 'is-active' : ''}`} onClick={() => goToView('patterns')}>
             <svg viewBox="0 0 20 20" fill="none"><path d="M3 16V8M9 16V4M15 16v-6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /><path d="M3 16h14" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
             Patterns
           </button>
-          <button type="button" className={`rail-link ${activeView === 'chat' ? 'is-active' : ''}`} onClick={() => setActiveView('chat')}>
+          <button type="button" className={`rail-link ${activeView === 'chat' ? 'is-active' : ''}`} onClick={() => goToView('chat')}>
             <svg viewBox="0 0 20 20" fill="none"><path d="M3.5 4.5h13a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H7l-4 2.5V5.5a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
             Talk it out
           </button>
-          <button type="button" className={`rail-link ${activeView === 'mentalmodel' ? 'is-active' : ''}`} onClick={() => setActiveView('mentalmodel')}>
+          <button type="button" className={`rail-link ${activeView === 'mentalmodel' ? 'is-active' : ''}`} onClick={() => goToView('mentalmodel')}>
             <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2" stroke="currentColor" strokeWidth="1.2" /><circle cx="4" cy="5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="16" cy="5" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="4" cy="15" r="1.5" stroke="currentColor" strokeWidth="1.2" /><circle cx="16" cy="15" r="1.5" stroke="currentColor" strokeWidth="1.2" /><path d="M5.5 5.8L8.5 8.5M11.5 8.5L14.5 5.8M5.5 14.2L8.5 11.5M11.5 11.5L14.5 14.2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" /></svg>
             Mental model
           </button>
-          <button type="button" className={`rail-link ${activeView === 'psychprofile' ? 'is-active' : ''}`} onClick={() => setActiveView('psychprofile')}>
+          <button type="button" className={`rail-link ${activeView === 'psychprofile' ? 'is-active' : ''}`} onClick={() => goToView('psychprofile')}>
             <svg viewBox="0 0 20 20" fill="none"><path d="M10 2.5C7 2.5 4.5 5 4.5 8c0 2.1 1.1 3.9 2.8 4.9V15h5.4v-2.1c1.7-1 2.8-2.8 2.8-4.9 0-3-2.5-5.5-5.5-5.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/><path d="M7.5 17.5h5M8.5 15.5v2M11.5 15.5v2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
             Psych profile
+          </button>
+          <button type="button" className={`rail-link rail-help rail-help-in-nav ${activeView === 'support' ? 'is-active' : ''}`} onClick={() => goToView('support')}>
+            <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.3" stroke="currentColor" strokeWidth="1.3" /><path d="M10 11.2v-.4c0-.7.4-1 .95-1.4.6-.4 1-.85 1-1.6 0-1-.85-1.8-1.95-1.8s-1.95.8-1.95 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /><circle cx="10" cy="13.7" r="0.15" fill="currentColor" stroke="currentColor" strokeWidth="0.9" /></svg>
+            If you need support
           </button>
         </nav>
 
         <div className="rail-bottom">
-          <button type="button" className={`rail-link rail-help ${activeView === 'support' ? 'is-active' : ''}`} onClick={() => setActiveView('support')}>
-            <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.3" stroke="currentColor" strokeWidth="1.3" /><path d="M10 11.2v-.4c0-.7.4-1 .95-1.4.6-.4 1-.85 1-1.6 0-1-.85-1.8-1.95-1.8s-1.95.8-1.95 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /><circle cx="10" cy="13.7" r="0.15" fill="currentColor" stroke="currentColor" strokeWidth="0.9" /></svg>
-            If you need support
-          </button>
-          <div className="rail-profile-wrap" ref={accountMenuRef}>
+          <div className="rail-profile-wrap">
             <button
               type="button"
               className="rail-profile"
@@ -1077,49 +1122,49 @@ export default function HomePage() {
                 <span className="rail-profile-streak">{token ? 'Signed in' : 'Sign in to save'}</span>
               </div>
             </button>
-
-            {showAccountMenu ? (
-              <div className="account-menu" role="menu">
-                {token ? (
-                  <>
-                    <div className="account-menu-info">
-                      <span className="account-menu-name">{user?.display_name}</span>
-                      <span className="account-menu-email">{user?.email}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="account-menu-item account-menu-item-danger"
-                      role="menuitem"
-                      onClick={() => { setShowAccountMenu(false); handleLogout(); }}
-                    >
-                      Log out
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      className="account-menu-item"
-                      role="menuitem"
-                      onClick={() => { setAuthMode('login'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
-                    >
-                      Sign in
-                    </button>
-                    <button
-                      type="button"
-                      className="account-menu-item"
-                      role="menuitem"
-                      onClick={() => { setAuthMode('register'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
-                    >
-                      Create account
-                    </button>
-                  </>
-                )}
-              </div>
-            ) : null}
           </div>
         </div>
       </aside>
+
+      {showAccountMenu ? (
+        <div className="account-menu" role="menu" ref={accountMenuRef}>
+          {token ? (
+            <>
+              <div className="account-menu-info">
+                <span className="account-menu-name">{user?.display_name}</span>
+                <span className="account-menu-email">{user?.email}</span>
+              </div>
+              <button
+                type="button"
+                className="account-menu-item account-menu-item-danger"
+                role="menuitem"
+                onClick={() => { setShowAccountMenu(false); handleLogout(); }}
+              >
+                Log out
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="account-menu-item"
+                role="menuitem"
+                onClick={() => { setAuthMode('login'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
+              >
+                Sign in
+              </button>
+              <button
+                type="button"
+                className="account-menu-item"
+                role="menuitem"
+                onClick={() => { setAuthMode('register'); setAuthMessage(''); setShowAccountMenu(false); setShowAccountModal(true); }}
+              >
+                Create account
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
 
       {showAccountModal ? (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Sign in or create an account" onClick={(e) => { if (e.target === e.currentTarget) setShowAccountModal(false); }}>

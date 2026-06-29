@@ -169,7 +169,12 @@ Guidelines:
 
 # ─── Database ──────────────────────────────────────────────────────────────────
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# `check_same_thread` is a SQLite-only connect arg — passing it to Postgres (or any other
+# driver) raises a TypeError at connection time, so it's only included for sqlite:// URLs.
+# This lets DATABASE_URL switch between sqlite:///... (local dev) and postgresql://...
+# (production, e.g. Neon/Render Postgres) with no other code changes required.
+_engine_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=_engine_connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
