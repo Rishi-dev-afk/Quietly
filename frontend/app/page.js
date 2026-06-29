@@ -1613,7 +1613,7 @@ export default function HomePage() {
               <path d="M17 19l11 10M36 25l11-9M17 45l11-10M36 39l11 9" stroke="#D8D2C4" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
             <p className="analysis-gate-title">
-              Write {mentalModelStatus.entries_remaining} more {mentalModelStatus.entries_remaining === 1 ? 'entry' : 'entries'} to unlock your mental model.
+              Write {mentalModelStatus.entries_remaining} more {mentalModelStatus.entries_remaining === 1 ? 'journal entry or conversation' : 'journal entries or conversations'} to unlock your mental model.
             </p>
             <div className="analysis-gate-progress">
               <div className="analysis-gate-track">
@@ -1622,7 +1622,7 @@ export default function HomePage() {
                   style={{ width: `${Math.min(100, (mentalModelStatus.entries_total / mentalModelStatus.entries_required) * 100)}%` }}
                 />
               </div>
-              <span className="analysis-gate-count">{mentalModelStatus.entries_total} of {mentalModelStatus.entries_required} entries</span>
+              <span className="analysis-gate-count">{mentalModelStatus.entries_total} of {mentalModelStatus.entries_required} entries or conversations</span>
             </div>
             <div className="analysis-gate-preview">
               <div className="analysis-gate-preview-blur">
@@ -1788,7 +1788,7 @@ export default function HomePage() {
               <path d="M24 54h16M27 46v8M37 46v8" stroke="#C9A893" strokeWidth="1.4" strokeLinecap="round"/>
             </svg>
             <p className="analysis-gate-title">
-              Write {psychProfileStatus.entries_remaining} more {psychProfileStatus.entries_remaining === 1 ? 'entry' : 'entries'} to unlock your psychological profile.
+              Write {psychProfileStatus.entries_remaining} more {psychProfileStatus.entries_remaining === 1 ? 'journal entry or conversation' : 'journal entries or conversations'} to unlock your psychological profile.
             </p>
             <div className="analysis-gate-progress">
               <div className="analysis-gate-track">
@@ -1797,7 +1797,7 @@ export default function HomePage() {
                   style={{ width: `${Math.min(100, (psychProfileStatus.entries_total / psychProfileStatus.entries_required) * 100)}%` }}
                 />
               </div>
-              <span className="analysis-gate-count">{psychProfileStatus.entries_total} of {psychProfileStatus.entries_required} entries</span>
+              <span className="analysis-gate-count">{psychProfileStatus.entries_total} of {psychProfileStatus.entries_required} entries or conversations</span>
             </div>
             <div className="analysis-gate-preview">
               <div className="analysis-gate-preview-blur">

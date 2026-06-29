@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 load_dotenv()
@@ -823,17 +823,45 @@ def build_content_digest(current_user: User, db: Session) -> tuple[str, int]:
     return digest, total_entry_count
 
 
-def get_entry_count(current_user: User, db: Session) -> int:
-    return db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+# Minimum number of messages in a chat session for it to count as a "meaningful" interaction
+# toward the unlock gate (2 user + 2 assistant = one real exchange plus a follow-up).
+QUALIFYING_CHAT_MIN_MESSAGES = 4
 
 
-def require_analysis_unlocked(total_entry_count: int) -> None:
-    if total_entry_count < ANALYSIS_UNLOCK_ENTRY_COUNT:
-        remaining = ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count
+def get_content_count(current_user: User, db: Session) -> int:
+    """Return the total number of meaningful content interactions for the current user.
+
+    Counts:
+    - Every journal entry (each is self-contained signal).
+    - Every chat session that has at least QUALIFYING_CHAT_MIN_MESSAGES messages
+      (filters out sessions that are just a greeting with no real depth).
+    """
+    journal_count = (
+        db.query(JournalEntry)
+        .filter(JournalEntry.user_id == current_user.id)
+        .count()
+    )
+
+    # Count distinct session_ids that have enough messages to be meaningful.
+    qualifying_sessions = (
+        db.query(ChatMessage.session_id)
+        .filter(ChatMessage.user_id == current_user.id)
+        .group_by(ChatMessage.session_id)
+        .having(func.count(ChatMessage.id) >= QUALIFYING_CHAT_MIN_MESSAGES)
+        .count()
+    )
+
+    return journal_count + qualifying_sessions
+
+
+def require_analysis_unlocked(total_content_count: int) -> None:
+    if total_content_count < ANALYSIS_UNLOCK_ENTRY_COUNT:
+        remaining = ANALYSIS_UNLOCK_ENTRY_COUNT - total_content_count
         raise HTTPException(
             status_code=403,
-            detail=f"Write {remaining} more entr{'y' if remaining == 1 else 'ies'} to unlock this feature "
-                    f"({ANALYSIS_UNLOCK_ENTRY_COUNT} total needed) — the more you've written, the more accurate this is.",
+            detail=f"You need {remaining} more journal {'entry' if remaining == 1 else 'entries'} or "
+                   f"{'conversation' if remaining == 1 else 'conversations'} to unlock this feature "
+                   f"({ANALYSIS_UNLOCK_ENTRY_COUNT} total needed) — the more you've shared, the more accurate this is.",
         )
 
 
@@ -841,23 +869,23 @@ def require_analysis_unlocked(total_entry_count: int) -> None:
 
 @app.get("/api/ai/mental-model/status", response_model=MentalModelStatusResponse)
 def mental_model_status(current_user: CurrentUser, db: Session = Depends(get_db)):
-    total_entry_count = db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+    total_content_count = get_content_count(current_user, db)
     latest = (
         db.query(MentalModelSnapshot)
         .filter(MentalModelSnapshot.user_id == current_user.id)
         .order_by(MentalModelSnapshot.created_at.desc())
         .first()
     )
-    unlocked = total_entry_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
+    unlocked = total_content_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
     update_available = False
     if latest is not None:
-        new_entries_since = total_entry_count - (latest.entry_count_at_build or 0)
-        update_available = new_entries_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
+        new_content_since = total_content_count - (latest.entry_count_at_build or 0)
+        update_available = new_content_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
     return MentalModelStatusResponse(
         has_snapshot=latest is not None,
-        entries_total=total_entry_count,
+        entries_total=total_content_count,
         entries_required=ANALYSIS_UNLOCK_ENTRY_COUNT,
-        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count),
+        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_content_count),
         unlocked=unlocked,
         update_available=update_available,
         last_built_at=latest.created_at if latest else None,
@@ -867,7 +895,7 @@ def mental_model_status(current_user: CurrentUser, db: Session = Depends(get_db)
 
 @app.post("/api/ai/mental-model", response_model=MentalModelResponse)
 async def build_mental_model(payload: MentalModelRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
-    require_analysis_unlocked(get_entry_count(current_user, db))
+    require_analysis_unlocked(get_content_count(current_user, db))
     digest, total_entry_count = build_content_digest(current_user, db)
 
     user_message = f"Here is my recent journal content and conversations:\n\n{digest}"
@@ -939,23 +967,23 @@ def get_latest_mental_model(current_user: CurrentUser, db: Session = Depends(get
 
 @app.get("/api/ai/psych-profile/status", response_model=PsychProfileStatusResponse)
 def psych_profile_status(current_user: CurrentUser, db: Session = Depends(get_db)):
-    total_entry_count = db.query(JournalEntry).filter(JournalEntry.user_id == current_user.id).count()
+    total_content_count = get_content_count(current_user, db)
     latest = (
         db.query(PsychProfileSnapshot)
         .filter(PsychProfileSnapshot.user_id == current_user.id)
         .order_by(PsychProfileSnapshot.created_at.desc())
         .first()
     )
-    unlocked = total_entry_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
+    unlocked = total_content_count >= ANALYSIS_UNLOCK_ENTRY_COUNT
     update_available = False
     if latest is not None:
-        new_entries_since = total_entry_count - (latest.entry_count_at_build or 0)
-        update_available = new_entries_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
+        new_content_since = total_content_count - (latest.entry_count_at_build or 0)
+        update_available = new_content_since >= ANALYSIS_REFRESH_EVERY_N_ENTRIES
     return PsychProfileStatusResponse(
         has_snapshot=latest is not None,
-        entries_total=total_entry_count,
+        entries_total=total_content_count,
         entries_required=ANALYSIS_UNLOCK_ENTRY_COUNT,
-        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_entry_count),
+        entries_remaining=max(0, ANALYSIS_UNLOCK_ENTRY_COUNT - total_content_count),
         unlocked=unlocked,
         update_available=update_available,
         last_built_at=latest.created_at if latest else None,
@@ -965,7 +993,7 @@ def psych_profile_status(current_user: CurrentUser, db: Session = Depends(get_db
 
 @app.post("/api/ai/psych-profile", response_model=PsychProfileResponse)
 async def build_psych_profile(payload: PsychProfileRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
-    require_analysis_unlocked(get_entry_count(current_user, db))
+    require_analysis_unlocked(get_content_count(current_user, db))
     digest, total_entry_count = build_content_digest(current_user, db)
 
     user_message = f"Here is my recent journal content and conversations:\n\n{digest}"
