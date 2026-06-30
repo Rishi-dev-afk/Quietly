@@ -220,32 +220,67 @@ function ReflectionCard({ state }) {
 // ─── Mental Model Brain Diagram ─────────────────────────────────────────────────
 
 const NODE_TYPE_COLORS = {
-  emotion:      { fill: '#C9A893', deep: '#8F5E45', stroke: '#A8765E', text: '#2B2A33' },
-  theme:        { fill: '#8A9298', deep: '#4A555C', stroke: '#5B6B73', text: '#FFFFFF' },
-  pattern:      { fill: '#EFEBE2', deep: '#C7BFAC', stroke: '#B5AC95', text: '#2B2A33' },
-  coping:       { fill: '#B8D4C8', deep: '#5C8E78', stroke: '#7AA898', text: '#2B2A33' },
-  relationship: { fill: '#C4B8D4', deep: '#6D5990', stroke: '#8A7AA8', text: '#2B2A33' },
-  tension:      { fill: '#D4B8B8', deep: '#9C5959', stroke: '#A87A7A', text: '#2B2A33' },
+  emotion:      { glow: '#E0A98A', stroke: '#C98A63', text: '#F2E9DD' },
+  theme:        { glow: '#9FB6C4', stroke: '#6E8B9C', text: '#EAF1F4' },
+  pattern:      { glow: '#D8D0BC', stroke: '#AFA587', text: '#F2EEE2' },
+  coping:       { glow: '#9AD6BC', stroke: '#5E9C82', text: '#E6F5EE' },
+  relationship: { glow: '#C2AEDE', stroke: '#9078B8', text: '#F0EAF7' },
+  tension:      { glow: '#E0A0A0', stroke: '#B86E6E', text: '#F7E9E9' },
 };
 const EDGE_COLORS = {
-  fuels:         '#A8765E',
-  conflicts_with:'#A87A7A',
-  leads_to:      '#7AA898',
-  soothes:       '#B8D4C8',
-  masks:         '#8A7AA8',
-  orbits:        '#C7BFAC',
+  fuels:         '#C98A63',
+  conflicts_with:'#B86E6E',
+  leads_to:      '#5E9C82',
+  soothes:       '#7FB8A0',
+  masks:         '#9078B8',
+  orbits:        '#8A8A98',
 };
 
 const DIAGRAM_W = 920;
 const DIAGRAM_H = 560;
 
 function nodeRadius(weight) {
-  return 19 + weight * 3.6;
+  return 17 + weight * 3.3;
 }
 
-// Lightweight force simulation — no dependencies. Runs synchronously to a
-// settled layout (connected nodes pulled together, others repelled apart,
-// everything gently bound to the canvas).
+// Deterministic pseudo-random from a string seed, so each node's organic
+// shape stays stable across re-renders instead of jittering.
+function seedRandom(seed) {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return () => {
+    h ^= h << 13; h >>>= 0;
+    h ^= h >>> 17;
+    h ^= h << 5; h >>>= 0;
+    return (h % 1000) / 1000;
+  };
+}
+
+// Builds an irregular, organic blob path (like a neuron soma) instead of a
+// perfect circle — smoothed through N perturbed points around the radius.
+function blobPath(r, seed) {
+  const rand = seedRandom(seed);
+  const points = 9;
+  const pts = [];
+  for (let i = 0; i < points; i++) {
+    const angle = (i / points) * Math.PI * 2;
+    const wobble = 0.82 + rand() * 0.36;
+    pts.push({ x: Math.cos(angle) * r * wobble, y: Math.sin(angle) * r * wobble });
+  }
+  let d = `M ${pts[0].x},${pts[0].y} `;
+  for (let i = 0; i < points; i++) {
+    const p0 = pts[i];
+    const p1 = pts[(i + 1) % points];
+    const mx = (p0.x + p1.x) / 2;
+    const my = (p0.y + p1.y) / 2;
+    d += `Q ${p0.x},${p0.y} ${mx},${my} `;
+  }
+  d += 'Z';
+  return d;
+}
+
+// Lightweight force simulation — no dependencies. Settles connected nodes
+// near each other and spaces everything else out, bound to the canvas.
 function simulateLayout(nodes, edges) {
   const cx = DIAGRAM_W / 2, cy = DIAGRAM_H / 2;
   const ids = nodes.map((n) => n.id);
@@ -319,7 +354,6 @@ function simulateLayout(nodes, edges) {
   return result;
 }
 
-// Wraps a label across up to 2 lines so it fits inside its circle.
 function wrapLabel(label, maxChars) {
   const words = label.split(' ');
   const lines = [];
@@ -357,62 +391,89 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
     <div style={{ position: 'relative', width: '100%' }}>
       <style>{`
         @keyframes mm-draw-edge { to { stroke-dashoffset: 0; } }
-        @keyframes mm-fade-in { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: scale(1); } }
-        @keyframes mm-pulse-ring { 0% { opacity: 0.55; r: var(--r0); } 100% { opacity: 0; r: var(--r1); } }
+        @keyframes mm-fade-in { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes mm-pulse-ring { 0% { opacity: 0.5; r: var(--r0); } 100% { opacity: 0; r: var(--r1); } }
+        @keyframes mm-flicker { 0%, 100% { opacity: 1; } 50% { opacity: 0.86; } }
         .mm-node-group { transition: filter 0.15s ease; }
-        .mm-node-group:hover { filter: brightness(1.04); }
+        .mm-node-group:hover .mm-soma { filter: url(#mm-node-glow-hover); }
       `}</style>
       <svg
         viewBox={`0 0 ${DIAGRAM_W} ${DIAGRAM_H}`}
         xmlns="http://www.w3.org/2000/svg"
-        style={{ width: '100%', display: 'block', overflow: 'visible' }}
+        style={{ width: '100%', display: 'block', overflow: 'visible', borderRadius: 18, background: '#0E0E14' }}
         aria-label="Mental model brain diagram"
       >
         <defs>
-          <radialGradient id="mm-bg-glow" cx="50%" cy="42%" r="65%">
-            <stop offset="0%" stopColor="#FBFAF7" />
-            <stop offset="55%" stopColor="#F6F4F0" />
-            <stop offset="100%" stopColor="#EEEAE0" />
+          <radialGradient id="mm-bg" cx="50%" cy="40%" r="75%">
+            <stop offset="0%" stopColor="#1B1C26" />
+            <stop offset="55%" stopColor="#121319" />
+            <stop offset="100%" stopColor="#0A0A0F" />
           </radialGradient>
-          <filter id="mm-node-shadow" x="-60%" y="-60%" width="220%" height="220%">
-            <feDropShadow dx="0" dy="2.5" stdDeviation="3.5" floodColor="#2B2A33" floodOpacity="0.22" />
+          <filter id="mm-grain">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch" result="noise" />
+            <feColorMatrix in="noise" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.025 0" />
           </filter>
-          {Object.entries(NODE_TYPE_COLORS).map(([type, c]) => (
-            <radialGradient key={type} id={`mm-grad-${type}`} cx="38%" cy="32%" r="75%">
-              <stop offset="0%" stopColor={c.fill} stopOpacity="1" />
-              <stop offset="65%" stopColor={c.fill} />
-              <stop offset="100%" stopColor={c.deep} />
-            </radialGradient>
-          ))}
+          <filter id="mm-node-glow" x="-120%" y="-120%" width="340%" height="340%">
+            <feGaussianBlur stdDeviation="6" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <filter id="mm-node-glow-hover" x="-140%" y="-140%" width="380%" height="380%">
+            <feGaussianBlur stdDeviation="9" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <filter id="mm-edge-glow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="1.4" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
-        <rect x="0" y="0" width={DIAGRAM_W} height={DIAGRAM_H} fill="url(#mm-bg-glow)" rx="18" />
+        <rect x="0" y="0" width={DIAGRAM_W} height={DIAGRAM_H} fill="url(#mm-bg)" rx="18" />
+        <rect x="0" y="0" width={DIAGRAM_W} height={DIAGRAM_H} filter="url(#mm-grain)" rx="18" opacity="0.5" />
 
         {edges.map((edge, i) => {
           const s = positions[edge.source];
           const t = positions[edge.target];
           if (!s || !t) return null;
-          const color = EDGE_COLORS[edge.relationship] || '#D8D2C4';
-          const strokeW = 0.9 + edge.strength * 0.45;
+          const color = EDGE_COLORS[edge.relationship] || '#8A8A98';
+          const strokeW = 0.6 + edge.strength * 0.28;
           const mx = (s.x + t.x) / 2 + (t.y - s.y) * 0.16;
           const my = (s.y + t.y) / 2 - (t.x - s.x) * 0.16;
           const len = Math.hypot(t.x - s.x, t.y - s.y) * 1.25 + 40;
+          const pathId = `mm-edge-path-${i}`;
           return (
-            <path
-              key={i}
-              d={`M${s.x},${s.y} Q${mx},${my} ${t.x},${t.y}`}
-              fill="none"
-              stroke={color}
-              strokeWidth={strokeW}
-              strokeLinecap="round"
-              opacity={drawn ? 0.5 : 0}
-              strokeDasharray={drawn ? 'none' : len}
-              strokeDashoffset={drawn ? 0 : len}
-              style={{
-                transition: 'opacity 0.6s ease',
-                animation: drawn ? `mm-draw-edge 0.9s ease ${0.15 + i * 0.025}s forwards` : 'none',
-              }}
-            />
+            <g key={i} filter="url(#mm-edge-glow)">
+              <path
+                id={pathId}
+                d={`M${s.x},${s.y} Q${mx},${my} ${t.x},${t.y}`}
+                fill="none"
+                stroke={color}
+                strokeWidth={strokeW}
+                strokeLinecap="round"
+                opacity={drawn ? 0.4 : 0}
+                strokeDasharray={drawn ? 'none' : len}
+                strokeDashoffset={drawn ? 0 : len}
+                style={{
+                  transition: 'opacity 0.6s ease',
+                  animation: drawn ? `mm-draw-edge 0.9s ease ${0.15 + i * 0.02}s forwards` : 'none',
+                }}
+              />
+              {drawn && edge.strength >= 3 && (
+                <circle r="1.6" fill={color} opacity="0.9">
+                  <animateMotion dur={`${2.4 + (i % 5) * 0.5}s`} repeatCount="indefinite" rotate="auto">
+                    <mpath href={`#${pathId}`} />
+                  </animateMotion>
+                </circle>
+              )}
+            </g>
           );
         })}
 
@@ -424,8 +485,9 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
           const isHovered = tooltip?.id === node.id;
           const isSelected = selectedNodeId === node.id;
           const lines = wrapLabel(node.label, Math.max(7, Math.round(r * 0.42)));
-          const fontSize = Math.max(9, Math.min(12.5, r * 0.36));
-          const lineHeight = fontSize * 1.18;
+          const fontSize = Math.max(8.5, Math.min(11.5, r * 0.34));
+          const lineHeight = fontSize * 1.2;
+          const path = blobPath(r, node.id);
 
           return (
             <g
@@ -435,7 +497,7 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
               style={{
                 cursor: onNodeClick ? 'pointer' : 'default',
                 opacity: drawn ? 1 : 0,
-                animation: drawn ? `mm-fade-in 0.45s ease ${0.05 + ni * 0.03}s backwards` : 'none',
+                animation: drawn ? `mm-fade-in 0.5s ease ${0.05 + ni * 0.03}s backwards, mm-flicker ${3 + (ni % 4)}s ease-in-out ${ni * 0.4}s infinite` : 'none',
               }}
               onMouseEnter={() => setTooltip({ id: node.id, x: pos.x, y: pos.y, node })}
               onMouseLeave={() => setTooltip(null)}
@@ -448,26 +510,25 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
             >
               {isSelected && (
                 <circle
-                  r={r + 9}
+                  r={r + 10}
                   fill="none"
                   stroke={colors.stroke}
-                  strokeWidth="2"
-                  strokeDasharray="2 5"
-                  style={{ animation: 'mm-pulse-ring 2.2s linear infinite', '--r0': `${r + 7}px`, '--r1': `${r + 16}px` }}
-                  opacity="0.7"
+                  strokeWidth="1.5"
+                  strokeDasharray="1.5 5"
+                  style={{ animation: 'mm-pulse-ring 2.4s linear infinite', '--r0': `${r + 8}px`, '--r1': `${r + 18}px` }}
+                  opacity="0.6"
                 />
               )}
-              {isHovered && <circle r={r + 6} fill={colors.stroke} opacity="0.16" />}
 
-              <circle r={r} fill={`url(#mm-grad-${node.type || 'theme'})`} filter="url(#mm-node-shadow)" stroke={colors.stroke} strokeWidth={isSelected ? 2 : 1.25} />
-              <ellipse cx={-r * 0.32} cy={-r * 0.38} rx={r * 0.42} ry={r * 0.28} fill="#FFFFFF" opacity="0.22" />
+              <path className="mm-soma" d={path} fill={colors.glow} fillOpacity={isHovered || isSelected ? 0.34 : 0.22} stroke={colors.stroke} strokeWidth="1" filter="url(#mm-node-glow)" />
+              <path d={path} fill="none" stroke={colors.stroke} strokeWidth="1" opacity="0.7" />
 
               <text
                 textAnchor="middle"
                 dominantBaseline="middle"
                 fill={colors.text}
                 fontSize={fontSize}
-                fontWeight="600"
+                fontWeight="500"
                 fontFamily="Inter, sans-serif"
                 style={{ userSelect: 'none', pointerEvents: 'none' }}
               >
@@ -489,21 +550,21 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
             left: `${Math.min(86, Math.max(14, (tooltip.x / DIAGRAM_W) * 100))}%`,
             top: `${Math.min(88, Math.max(8, (tooltip.y / DIAGRAM_H) * 100))}%`,
             transform: 'translate(-50%, -122%)',
-            background: '#2B2A33',
-            color: '#F6F4F0',
-            borderRadius: 12,
+            background: 'rgba(18,19,25,0.96)',
+            color: '#EAEAEF',
+            borderRadius: 10,
             padding: '11px 15px',
             maxWidth: 230,
             fontSize: 12.5,
             lineHeight: 1.5,
             pointerEvents: 'none',
             zIndex: 10,
-            boxShadow: '0 10px 28px rgba(0,0,0,0.28)',
+            boxShadow: '0 10px 28px rgba(0,0,0,0.45)',
             border: '1px solid rgba(255,255,255,0.08)',
           }}
         >
           <div style={{ fontWeight: 700, marginBottom: 4, fontSize: 13 }}>{tooltip.node.label}</div>
-          <div style={{ opacity: 0.65, fontSize: 11, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          <div style={{ opacity: 0.6, fontSize: 11, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             {tooltip.node.type} · weight {tooltip.node.weight}/10
           </div>
           <div>{tooltip.node.description}</div>
@@ -513,7 +574,7 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px', marginTop: 20, paddingTop: 16, borderTop: '1px solid #EFEBE2' }}>
         {Object.entries(NODE_TYPE_COLORS).map(([type, colors]) => (
           <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#5B6B73' }}>
-            <div style={{ width: 10, height: 10, borderRadius: '50%', background: `linear-gradient(135deg, ${colors.fill}, ${colors.deep})`, border: `1.5px solid ${colors.stroke}` }} />
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: colors.glow, border: `1.5px solid ${colors.stroke}` }} />
             <span style={{ textTransform: 'capitalize' }}>{type}</span>
           </div>
         ))}
