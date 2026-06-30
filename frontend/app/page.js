@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import BrainDiagram3D from './BrainDiagram3D';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
@@ -2051,7 +2052,7 @@ export default function HomePage() {
               </div>
 
               <div className="mental-model-diagram">
-                <BrainDiagram
+                <BrainDiagram3D
                   nodes={displayedSnapshot.nodes}
                   edges={displayedSnapshot.edges}
                   onNodeClick={selectMentalModelNode}
