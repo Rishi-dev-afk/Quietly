@@ -213,6 +213,11 @@ class ChatMessage(Base):
     session_id = Column(String(36), index=True, nullable=False)
     role = Column(String(20), nullable=False)  # "user" or "assistant"
     content = Column(Text, nullable=False)
+    # session_type: "chat" for regular open chat, "node_chat" for node-scoped conversations.
+    # node_label: the mental model node label this session is about (node_chat only).
+    # Both are nullable so existing rows (and regular chat rows) don't need migration.
+    session_type = Column(String(20), nullable=True)
+    node_label = Column(String(200), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -336,6 +341,8 @@ class ChatSessionSummary(BaseModel):
     started_at: datetime
     message_count: int
     preview: str
+    session_type: str | None = None   # "chat" | "node_chat" | None (legacy rows)
+    node_label: str | None = None     # populated when session_type == "node_chat"
 
 
 class ChatSessionListResponse(BaseModel):
@@ -578,6 +585,30 @@ def enforce_auth_rate_limit(request: Request) -> None:
     )
 
 
+# Per-user limit for authenticated AI endpoints (chat, node-chat, mental model, psych profile).
+# Keyed by user_id rather than IP so each account has its own independent bucket, and a shared
+# IP (e.g. NAT, office) doesn't let one account exhaust another's quota.
+USER_AI_CALL_LIMIT = 30
+USER_AI_CALL_WINDOW_SECONDS = 60 * 60  # 1 hour
+
+
+def enforce_user_ai_rate_limit(request: Request, user_id: int) -> None:
+    """Rate-limit authenticated AI calls by user_id. Reuses the same in-memory store as the
+    other limiters — same caveats apply (resets on restart, not shared across worker processes)."""
+    key = f"user_ai:{user_id}"
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - USER_AI_CALL_WINDOW_SECONDS
+
+    hits = [t for t in _rate_limit_hits.get(key, []) if t > cutoff]
+    if len(hits) >= USER_AI_CALL_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You've made {USER_AI_CALL_LIMIT} AI requests in the last hour. Take a breath — your limit resets on a rolling 60-minute window.",
+        )
+    hits.append(now)
+    _rate_limit_hits[key] = hits
+
+
 async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -> tuple[str, str]:
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=503, detail="AI features aren't configured yet. Set OPENROUTER_API_KEY on the server.")
@@ -721,7 +752,8 @@ async def reflect_on_entry(payload: ReflectionRequest, request: Request, current
 # AI — Chat (with persistence)
 
 @app.post("/api/ai/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+async def chat(payload: ChatRequest, request: Request, current_user: CurrentUser, db: Session = Depends(get_db)):
+    enforce_user_ai_rate_limit(request, current_user.id)
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
@@ -743,6 +775,7 @@ async def chat(payload: ChatRequest, current_user: CurrentUser, db: Session = De
             session_id=session_id,
             role="user",
             content=latest_user_msg.content,
+            session_type="chat",
         )
         db.add(db_user_msg)
         db.commit()
@@ -755,6 +788,7 @@ async def chat(payload: ChatRequest, current_user: CurrentUser, db: Session = De
         session_id=session_id,
         role="assistant",
         content=reply,
+        session_type="chat",
     )
     db.add(db_assistant_msg)
     db.commit()
@@ -782,6 +816,8 @@ def list_chat_sessions(current_user: CurrentUser, db: Session = Depends(get_db))
                 "started_at": msg.created_at,
                 "message_count": 0,
                 "preview": "",
+                "session_type": msg.session_type,
+                "node_label": msg.node_label,
             }
         sessions[msg.session_id]["message_count"] += 1
         # Preview = first user message
@@ -961,7 +997,8 @@ def mental_model_status(current_user: CurrentUser, db: Session = Depends(get_db)
 
 
 @app.post("/api/ai/mental-model", response_model=MentalModelResponse)
-async def build_mental_model(payload: MentalModelRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+async def build_mental_model(payload: MentalModelRequest, request: Request, current_user: CurrentUser, db: Session = Depends(get_db)):
+    enforce_user_ai_rate_limit(request, current_user.id)
     require_analysis_unlocked(get_content_count(current_user, db))
     digest, total_entry_count = build_content_digest(current_user, db)
 
@@ -1032,15 +1069,18 @@ def get_latest_mental_model(current_user: CurrentUser, db: Session = Depends(get
 
 @app.get("/api/ai/mental-model/history", response_model=MentalModelHistoryResponse)
 def get_mental_model_history(current_user: CurrentUser, db: Session = Depends(get_db)):
-    """Returns every mental model snapshot ever built for this user, oldest first. Powers the
+    """Returns up to the last 50 mental model snapshots for this user, oldest first. Powers the
     time-lapse view — scrubbing through past snapshots to watch the graph evolve — rather than
-    only ever seeing the latest build."""
+    only ever seeing the latest build. Capped at 50 to keep the response size bounded."""
     snapshots = (
         db.query(MentalModelSnapshot)
         .filter(MentalModelSnapshot.user_id == current_user.id)
-        .order_by(MentalModelSnapshot.created_at.asc())
+        .order_by(MentalModelSnapshot.created_at.desc())
+        .limit(50)
         .all()
     )
+    # Reverse so the caller gets oldest-first order for the time-lapse scrubber
+    snapshots = list(reversed(snapshots))
     return MentalModelHistoryResponse(
         snapshots=[
             MentalModelHistoryItem(
@@ -1086,7 +1126,8 @@ def psych_profile_status(current_user: CurrentUser, db: Session = Depends(get_db
 
 
 @app.post("/api/ai/psych-profile", response_model=PsychProfileResponse)
-async def build_psych_profile(payload: PsychProfileRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+async def build_psych_profile(payload: PsychProfileRequest, request: Request, current_user: CurrentUser, db: Session = Depends(get_db)):
+    enforce_user_ai_rate_limit(request, current_user.id)
     require_analysis_unlocked(get_content_count(current_user, db))
     digest, total_entry_count = build_content_digest(current_user, db)
 
@@ -1200,13 +1241,14 @@ def get_evidence(payload: EvidenceRequest, current_user: CurrentUser, db: Sessio
 # AI — Node-scoped chat
 
 @app.post("/api/ai/mental-model/node-chat", response_model=NodeChatResponse)
-async def node_chat(payload: NodeChatRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+async def node_chat(payload: NodeChatRequest, request: Request, current_user: CurrentUser, db: Session = Depends(get_db)):
     """A chat scoped to a single mental-model node — e.g. clicking the tension node 'wanting
     connection vs. fear of being seen' and talking it through directly, instead of starting a
     conversation from a blank page. Grounded with the actual journal/chat excerpts that produced
     the node, when evidence ids are provided, so the AI isn't reasoning from the label alone.
     Persists into the same chat_messages/session_id model as regular chat, so these conversations
     show up in chat history like any other."""
+    enforce_user_ai_rate_limit(request, current_user.id)
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
 
@@ -1236,12 +1278,26 @@ async def node_chat(payload: NodeChatRequest, current_user: CurrentUser, db: Ses
 
     latest_user_msg = next((m for m in reversed(payload.messages) if m.role == "user"), None)
     if latest_user_msg:
-        db.add(ChatMessage(user_id=current_user.id, session_id=session_id, role="user", content=latest_user_msg.content))
+        db.add(ChatMessage(
+            user_id=current_user.id,
+            session_id=session_id,
+            role="user",
+            content=latest_user_msg.content,
+            session_type="node_chat",
+            node_label=payload.node_label,
+        ))
         db.commit()
 
     reply, actual_model = await call_openrouter(messages, model)
 
-    db.add(ChatMessage(user_id=current_user.id, session_id=session_id, role="assistant", content=reply))
+    db.add(ChatMessage(
+        user_id=current_user.id,
+        session_id=session_id,
+        role="assistant",
+        content=reply,
+        session_type="node_chat",
+        node_label=payload.node_label,
+    ))
     db.commit()
 
     return NodeChatResponse(reply=reply, model=actual_model, session_id=session_id)
