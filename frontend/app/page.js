@@ -234,7 +234,7 @@ const EDGE_COLORS = {
   orbits:        '#C7BFAC',
 };
 
-function BrainDiagram({ nodes, edges }) {
+function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
   const svgRef = useRef(null);
   const [tooltip, setTooltip] = useState(null);
   const [positions, setPositions] = useState({});
@@ -316,15 +316,23 @@ function BrainDiagram({ nodes, edges }) {
           const colors = NODE_TYPE_COLORS[node.type] || NODE_TYPE_COLORS.theme;
           const r = nodeRadius(node.weight);
           const isHovered = tooltip?.id === node.id;
+          const isSelected = selectedNodeId === node.id;
 
           return (
             <g
               key={node.id}
               transform={`translate(${pos.x}, ${pos.y})`}
-              style={{ cursor: 'pointer' }}
+              style={{ cursor: onNodeClick ? 'pointer' : 'default' }}
               onMouseEnter={() => setTooltip({ id: node.id, x: pos.x, y: pos.y, node })}
               onMouseLeave={() => setTooltip(null)}
+              onClick={() => onNodeClick && onNodeClick(node)}
+              role={onNodeClick ? 'button' : undefined}
+              tabIndex={onNodeClick ? 0 : undefined}
+              onKeyDown={(e) => {
+                if (onNodeClick && (e.key === 'Enter' || e.key === ' ')) onNodeClick(node);
+              }}
             >
+              {isSelected && <circle r={r + 11} fill="none" stroke={colors.stroke} strokeWidth="2" strokeDasharray="3 3" />}
               {isHovered && <circle r={r + 8} fill={colors.fill} opacity="0.2" />}
               <circle r={r} fill={colors.fill} stroke={colors.stroke} strokeWidth="1.5" />
               <foreignObject x={-r} y={-r} width={r * 2} height={r * 2} style={{ overflow: 'visible' }}>
@@ -515,6 +523,21 @@ export default function HomePage() {
   const [mentalModelStatus, setMentalModelStatus] = useState(null);
   const [isMentalModelLoading, setIsMentalModelLoading] = useState(false);
   const [mentalModelError, setMentalModelError] = useState('');
+
+  // Time-lapse: full history of snapshots, and which one (if any) is being scrubbed to.
+  // When viewedHistoryIndex is null, the diagram shows the latest build (mentalModel) as before.
+  const [mentalModelHistory, setMentalModelHistory] = useState([]);
+  const [viewedHistoryIndex, setViewedHistoryIndex] = useState(null);
+
+  // Node provenance panel — which node is selected, and the evidence excerpts it resolved to.
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [nodeEvidence, setNodeEvidence] = useState(null); // { status: 'loading' | 'done' | 'error', items: [] }
+
+  // Node-scoped chat — a focused conversation seeded with a single node's context.
+  const [nodeChatMessages, setNodeChatMessages] = useState([]);
+  const [nodeChatInput, setNodeChatInput] = useState('');
+  const [isNodeChatLoading, setIsNodeChatLoading] = useState(false);
+  const [nodeChatSessionId, setNodeChatSessionId] = useState(null);
 
   // Psych profile state
   const [psychProfile, setPsychProfile] = useState(null);
@@ -711,6 +734,7 @@ export default function HomePage() {
   useEffect(() => {
     if (activeView === 'mentalmodel' && token) {
       loadMentalModelStatus();
+      loadMentalModelHistory();
     }
   }, [activeView, token]);
 
@@ -770,11 +794,97 @@ export default function HomePage() {
       if (!response.ok) throw new Error(data.detail || 'Could not build mental model');
       setPreviousMentalModel(mentalModel);
       setMentalModel(data);
+      setViewedHistoryIndex(null);
+      setSelectedNode(null);
+      setNodeEvidence(null);
       loadMentalModelStatus();
+      loadMentalModelHistory();
     } catch (error) {
       setMentalModelError(error.message || 'Could not build mental model');
     } finally {
       setIsMentalModelLoading(false);
+    }
+  };
+
+  const loadMentalModelHistory = async () => {
+    if (!token) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/mental-model/history`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      setMentalModelHistory(data.snapshots || []);
+    } catch {
+      // Time-lapse is a soft enhancement on top of the existing latest-snapshot view — if it
+      // fails to load, the rest of the Mental Model tab still works fine.
+    }
+  };
+
+  // Resolve the evidence ids a node cites into the actual journal/chat excerpts they came from.
+  const loadNodeEvidence = async (node) => {
+    if (!token || !node?.evidence?.length) {
+      setNodeEvidence({ status: 'done', items: [] });
+      return;
+    }
+    setNodeEvidence({ status: 'loading', items: [] });
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/evidence`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ ids: node.evidence }),
+      });
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      setNodeEvidence({ status: 'done', items: data.items || [] });
+    } catch {
+      setNodeEvidence({ status: 'error', items: [] });
+    }
+  };
+
+  const selectMentalModelNode = (node) => {
+    setSelectedNode(node);
+    setNodeChatMessages([]);
+    setNodeChatInput('');
+    setNodeChatSessionId(null);
+    loadNodeEvidence(node);
+  };
+
+  const closeNodePanel = () => {
+    setSelectedNode(null);
+    setNodeEvidence(null);
+    setNodeChatMessages([]);
+    setNodeChatSessionId(null);
+  };
+
+  const sendNodeChatMessage = async () => {
+    if (!token || !selectedNode || !nodeChatInput.trim()) return;
+    const userMessage = { role: 'user', content: nodeChatInput.trim() };
+    const nextMessages = [...nodeChatMessages, userMessage];
+    setNodeChatMessages(nextMessages);
+    setNodeChatInput('');
+    setIsNodeChatLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/ai/mental-model/node-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          node_label: selectedNode.label,
+          node_type: selectedNode.type,
+          node_description: selectedNode.description,
+          evidence_ids: selectedNode.evidence || [],
+          messages: nextMessages,
+          session_id: nodeChatSessionId,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not send that message');
+      setNodeChatSessionId(data.session_id);
+      setNodeChatMessages((current) => [...current, { role: 'assistant', content: data.reply }]);
+    } catch (error) {
+      setNodeChatMessages((current) => [...current, { role: 'assistant', content: error.message || "Couldn't get a reply just now — try again?", isError: true }]);
+    } finally {
+      setIsNodeChatLoading(false);
     }
   };
 
@@ -842,6 +952,12 @@ export default function HomePage() {
     setMentalModel(null);
     setPreviousMentalModel(null);
     setMentalModelStatus(null);
+    setMentalModelHistory([]);
+    setViewedHistoryIndex(null);
+    setSelectedNode(null);
+    setNodeEvidence(null);
+    setNodeChatMessages([]);
+    setNodeChatSessionId(null);
     setPsychProfile(null);
     setPreviousPsychProfile(null);
     setPsychProfileStatus(null);
@@ -1668,78 +1784,188 @@ export default function HomePage() {
           </div>
         )}
 
-        {mentalModel && !isMentalModelLoading && (
-          <div className="mental-model-content">
-            {mentalModelStatus?.update_available && (
-              <div className="analysis-update-banner">
-                <p>You've written more since this was built — <strong>your map may have shifted.</strong></p>
-                <button className="ghost-btn" onClick={loadMentalModel} disabled={isMentalModelLoading}>Update now</button>
-              </div>
-            )}
+        {mentalModel && !isMentalModelLoading && (() => {
+          // When scrubbing the time-lapse slider, show that historical snapshot instead of the
+          // latest build — but keep the "rebuild" banner and button tied to the real latest state.
+          const displayedSnapshot = viewedHistoryIndex !== null ? mentalModelHistory[viewedHistoryIndex] : mentalModel;
+          const diffPrevious = viewedHistoryIndex !== null
+            ? mentalModelHistory[viewedHistoryIndex - 1] || null
+            : previousMentalModel;
+          const isViewingPast = viewedHistoryIndex !== null && viewedHistoryIndex !== mentalModelHistory.length - 1;
 
-            {(() => {
-              const diff = diffMentalModels(previousMentalModel, mentalModel);
-              if (!diff) return null;
-              return (
-                <div className="analysis-diff">
-                  <p className="analysis-diff-title">Since last time</p>
-                  <ul className="analysis-diff-list">
-                    {diff.newcomers.map((n) => (
-                      <li key={`new-${n.id}`}><span>{n.label}</span> showed up for the first time.</li>
-                    ))}
-                    {diff.shifted.map((s) => (
-                      <li key={`shift-${s.label}`}>
-                        <span>{s.label}</span> moved from {s.from} to {s.to}{' '}
-                        <span className={s.to > s.from ? 'analysis-diff-up' : 'analysis-diff-down'}>
-                          ({s.to > s.from ? '↑' : '↓'} {Math.abs(s.to - s.from)})
-                        </span>
-                      </li>
-                    ))}
-                    {diff.faded.map((n) => (
-                      <li key={`faded-${n.id}`}><span>{n.label}</span> has faded from the picture.</li>
-                    ))}
-                  </ul>
+          return (
+            <div className="mental-model-content">
+              {mentalModelStatus?.update_available && !isViewingPast && (
+                <div className="analysis-update-banner">
+                  <p>You've written more since this was built — <strong>your map may have shifted.</strong></p>
+                  <button className="ghost-btn" onClick={loadMentalModel} disabled={isMentalModelLoading}>Update now</button>
                 </div>
-              );
-            })()}
+              )}
 
-            <div className="mental-model-summary">
-              <svg viewBox="0 0 20 20" fill="none" className="reflect-card-icon" style={{ flexShrink: 0, marginTop: 2 }}>
-                <path d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4L10 13.5l-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-              </svg>
-              <p>{mentalModel.summary}</p>
-            </div>
+              {mentalModelHistory.length > 1 && (
+                <div className="mental-model-timelapse">
+                  <div className="mental-model-timelapse-header">
+                    <span className="mental-model-timelapse-title">Time-lapse</span>
+                    <span className="mental-model-timelapse-date">
+                      {formatDate(new Date(displayedSnapshot.created_at), { month: 'short', day: 'numeric', year: 'numeric' })}
+                      {isViewingPast ? ' (past snapshot)' : ' (latest)'}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={mentalModelHistory.length - 1}
+                    value={viewedHistoryIndex !== null ? viewedHistoryIndex : mentalModelHistory.length - 1}
+                    onChange={(e) => {
+                      const idx = Number(e.target.value);
+                      setViewedHistoryIndex(idx === mentalModelHistory.length - 1 ? null : idx);
+                      setSelectedNode(null);
+                      setNodeEvidence(null);
+                    }}
+                    className="mental-model-timelapse-slider"
+                    aria-label="Scrub through past mental model snapshots"
+                  />
+                  <p className="mental-model-timelapse-hint">Drag to watch your map shift over {mentalModelHistory.length} builds.</p>
+                </div>
+              )}
 
-            <div className="mental-model-diagram">
-              <BrainDiagram nodes={mentalModel.nodes} edges={mentalModel.edges} />
-            </div>
+              {(() => {
+                const diff = diffMentalModels(diffPrevious, displayedSnapshot);
+                if (!diff) return null;
+                return (
+                  <div className="analysis-diff">
+                    <p className="analysis-diff-title">{isViewingPast ? 'Compared to the snapshot before' : 'Since last time'}</p>
+                    <ul className="analysis-diff-list">
+                      {diff.newcomers.map((n) => (
+                        <li key={`new-${n.id}`}><span>{n.label}</span> showed up for the first time.</li>
+                      ))}
+                      {diff.shifted.map((s) => (
+                        <li key={`shift-${s.label}`}>
+                          <span>{s.label}</span> moved from {s.from} to {s.to}{' '}
+                          <span className={s.to > s.from ? 'analysis-diff-up' : 'analysis-diff-down'}>
+                            ({s.to > s.from ? '↑' : '↓'} {Math.abs(s.to - s.from)})
+                          </span>
+                        </li>
+                      ))}
+                      {diff.faded.map((n) => (
+                        <li key={`faded-${n.id}`}><span>{n.label}</span> has faded from the picture.</li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
 
-            <div className="mental-model-nodes-list">
-              <h3 className="mental-model-nodes-title">What's in the map</h3>
-              <div className="mental-model-nodes-grid">
-                {mentalModel.nodes.sort((a, b) => b.weight - a.weight).map((node) => {
-                  const colors = NODE_TYPE_COLORS[node.type] || NODE_TYPE_COLORS.theme;
-                  return (
-                    <div key={node.id} className="mental-model-node-card">
-                      <div className="mental-model-node-header">
-                        <div style={{ width: 10, height: 10, borderRadius: '50%', background: colors.fill, border: `1.5px solid ${colors.stroke}`, flexShrink: 0 }} />
-                        <span className="mental-model-node-label">{node.label}</span>
-                        <span className="mental-model-node-type">{node.type}</span>
-                      </div>
-                      <p className="mental-model-node-desc">{node.description}</p>
-                    </div>
-                  );
-                })}
+              <div className="mental-model-summary">
+                <svg viewBox="0 0 20 20" fill="none" className="reflect-card-icon" style={{ flexShrink: 0, marginTop: 2 }}>
+                  <path d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4L10 13.5l-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+                </svg>
+                <p>{displayedSnapshot.summary}</p>
               </div>
-            </div>
 
-            {mentalModel.created_at && (
-              <span className="analysis-meta">
-                Built {formatDate(new Date(mentalModel.created_at), { month: 'short', day: 'numeric' })} from {mentalModel.entry_count_at_build} {mentalModel.entry_count_at_build === 1 ? 'entry' : 'entries'}.
-              </span>
-            )}
-          </div>
-        )}
+              <div className="mental-model-diagram">
+                <BrainDiagram
+                  nodes={displayedSnapshot.nodes}
+                  edges={displayedSnapshot.edges}
+                  onNodeClick={selectMentalModelNode}
+                  selectedNodeId={selectedNode?.id}
+                />
+                <p className="mental-model-diagram-hint">Click a node to see what it's drawn from, or talk it through.</p>
+              </div>
+
+              {selectedNode && (
+                <div className="mental-model-node-panel">
+                  <div className="mental-model-node-panel-header">
+                    <div>
+                      <span className="mental-model-node-panel-label">{selectedNode.label}</span>
+                      <span className="mental-model-node-type">{selectedNode.type}</span>
+                    </div>
+                    <button className="ghost-btn" onClick={closeNodePanel} aria-label="Close">Close</button>
+                  </div>
+                  <p className="mental-model-node-desc">{selectedNode.description}</p>
+
+                  <div className="mental-model-evidence">
+                    <h4 className="mental-model-evidence-title">What this is drawn from</h4>
+                    {nodeEvidence?.status === 'loading' && <p className="mental-model-evidence-loading">Looking it up…</p>}
+                    {nodeEvidence?.status === 'error' && <p className="mental-model-evidence-loading">Could not load the source entries.</p>}
+                    {nodeEvidence?.status === 'done' && nodeEvidence.items.length === 0 && (
+                      <p className="mental-model-evidence-loading">No specific entries were cited for this one — it reflects a broader pattern across your writing.</p>
+                    )}
+                    {nodeEvidence?.status === 'done' && nodeEvidence.items.length > 0 && (
+                      <ul className="mental-model-evidence-list">
+                        {nodeEvidence.items.map((item) => (
+                          <li key={item.id} className="mental-model-evidence-item">
+                            <span className="mental-model-evidence-meta">
+                              {item.type === 'journal' ? 'Journal' : 'Chat'}
+                              {item.created_at ? ` · ${formatDate(new Date(item.created_at), { month: 'short', day: 'numeric' })}` : ''}
+                            </span>
+                            <p>"{item.content}"</p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  <div className="mental-model-node-chat">
+                    <h4 className="mental-model-evidence-title">Talk about this</h4>
+                    {nodeChatMessages.length > 0 && (
+                      <div className="mental-model-node-chat-thread">
+                        {nodeChatMessages.map((msg, i) => (
+                          <div key={i} className={`mental-model-node-chat-msg ${msg.role} ${msg.isError ? 'is-error' : ''}`}>
+                            {msg.content}
+                          </div>
+                        ))}
+                        {isNodeChatLoading && <div className="mental-model-node-chat-msg assistant is-loading">Thinking…</div>}
+                      </div>
+                    )}
+                    <form
+                      className="mental-model-node-chat-form"
+                      onSubmit={(e) => { e.preventDefault(); sendNodeChatMessage(); }}
+                    >
+                      <input
+                        type="text"
+                        value={nodeChatInput}
+                        onChange={(e) => setNodeChatInput(e.target.value)}
+                        placeholder={`Ask about "${selectedNode.label}"…`}
+                        disabled={isNodeChatLoading}
+                      />
+                      <button type="submit" className="solid-btn" disabled={isNodeChatLoading || !nodeChatInput.trim()}>Send</button>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              <div className="mental-model-nodes-list">
+                <h3 className="mental-model-nodes-title">What's in the map</h3>
+                <div className="mental-model-nodes-grid">
+                  {[...displayedSnapshot.nodes].sort((a, b) => b.weight - a.weight).map((node) => {
+                    const colors = NODE_TYPE_COLORS[node.type] || NODE_TYPE_COLORS.theme;
+                    return (
+                      <button
+                        key={node.id}
+                        type="button"
+                        className={`mental-model-node-card ${selectedNode?.id === node.id ? 'is-selected' : ''}`}
+                        onClick={() => selectMentalModelNode(node)}
+                      >
+                        <div className="mental-model-node-header">
+                          <div style={{ width: 10, height: 10, borderRadius: '50%', background: colors.fill, border: `1.5px solid ${colors.stroke}`, flexShrink: 0 }} />
+                          <span className="mental-model-node-label">{node.label}</span>
+                          <span className="mental-model-node-type">{node.type}</span>
+                        </div>
+                        <p className="mental-model-node-desc">{node.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {displayedSnapshot.created_at && (
+                <span className="analysis-meta">
+                  Built {formatDate(new Date(displayedSnapshot.created_at), { month: 'short', day: 'numeric' })} from {displayedSnapshot.entry_count_at_build} {displayedSnapshot.entry_count_at_build === 1 ? 'entry' : 'entries'}.
+                </span>
+              )}
+            </div>
+          );
+        })()}
       </main>
 
       {/* ── Psychological Profile ── */}
