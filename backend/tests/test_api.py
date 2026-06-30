@@ -18,6 +18,19 @@ def client():
         yield test_client
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    # The rate limiter is an in-memory module-level dict (by design — see main.py). That's fine in
+    # production (one process, real wall-clock windows) but means it persists across tests in the
+    # same pytest run unless reset, which would make earlier tests' register/login calls bleed into
+    # later tests' rate-limit budgets. Each test should start with a clean slate.
+    import main
+
+    main._rate_limit_hits.clear()
+    yield
+    main._rate_limit_hits.clear()
+
+
 def test_register_login_and_entries_flow(client):
     register_response = client.post(
         "/api/auth/register",
@@ -279,6 +292,115 @@ def test_delete_chat_session(client, monkeypatch):
 
     second_delete = client.delete(f"/api/chat/sessions/{session_id}", headers=auth_headers)
     assert second_delete.status_code == 404
+
+
+def _register_and_login(client, email):
+    register = client.post(
+        "/api/auth/register",
+        json={"email": email, "password": "secret123", "display_name": email.split("@")[0]},
+    )
+    assert register.status_code == 201
+    token = client.post("/api/auth/login", json={"email": email, "password": "secret123"}).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_mental_model_history_returns_snapshots_oldest_first(client, monkeypatch):
+    import main
+
+    headers = _register_and_login(client, "history@example.com")
+
+    for i in range(main.ANALYSIS_UNLOCK_ENTRY_COUNT):
+        client.post(
+            "/api/journal/entries",
+            headers=headers,
+            json={"content": f"Entry number {i}", "mood": 3, "status": "closed"},
+        )
+
+    async def fake_call_openrouter(messages, model, timeout=60):
+        return (
+            '{"nodes": [{"id": "n1", "label": "Test Node", "type": "theme", "weight": 5, '
+            '"description": "desc", "evidence": ["journal:1"]}], "edges": [], "summary": "A test summary."}',
+            model,
+        )
+
+    monkeypatch.setattr(main, "OPENROUTER_API_KEY", "sk-or-fake-for-test")
+    monkeypatch.setattr(main, "call_openrouter", fake_call_openrouter)
+
+    # Build it twice so there are two snapshots to scrub between.
+    build_1 = client.post("/api/ai/mental-model", headers=headers, json={})
+    assert build_1.status_code == 200
+    build_2 = client.post("/api/ai/mental-model", headers=headers, json={})
+    assert build_2.status_code == 200
+
+    history_response = client.get("/api/ai/mental-model/history", headers=headers)
+    assert history_response.status_code == 200
+    snapshots = history_response.json()["snapshots"]
+    assert len(snapshots) == 2
+    # Oldest first.
+    assert snapshots[0]["created_at"] <= snapshots[1]["created_at"]
+    assert snapshots[0]["nodes"][0]["label"] == "Test Node"
+
+
+def test_evidence_resolves_only_own_content(client):
+    headers_a = _register_and_login(client, "evidence-a@example.com")
+    headers_b = _register_and_login(client, "evidence-b@example.com")
+
+    entry = client.post(
+        "/api/journal/entries",
+        headers=headers_a,
+        json={"content": "A private entry from user A.", "mood": 3, "status": "closed"},
+    ).json()
+
+    # User A can resolve their own entry.
+    response_a = client.post("/api/ai/evidence", headers=headers_a, json={"ids": [f"journal:{entry['id']}"]})
+    assert response_a.status_code == 200
+    items_a = response_a.json()["items"]
+    assert len(items_a) == 1
+    assert items_a[0]["content"] == "A private entry from user A."
+
+    # User B cannot resolve user A's entry — it's silently skipped, not leaked or errored.
+    response_b = client.post("/api/ai/evidence", headers=headers_b, json={"ids": [f"journal:{entry['id']}"]})
+    assert response_b.status_code == 200
+    assert response_b.json()["items"] == []
+
+    # Malformed ids are skipped, not errors.
+    response_malformed = client.post("/api/ai/evidence", headers=headers_a, json={"ids": ["not-a-valid-id", "journal:999999"]})
+    assert response_malformed.status_code == 200
+    assert response_malformed.json()["items"] == []
+
+
+def test_node_chat_persists_and_returns_session(client, monkeypatch):
+    import main
+
+    headers = _register_and_login(client, "nodechat@example.com")
+    monkeypatch.setattr(main, "OPENROUTER_API_KEY", "sk-or-fake-for-test")
+
+    async def fake_call_openrouter(messages, model, timeout=60):
+        # The node context should have been folded into the system prompt.
+        assert "Avoidance" in messages[0]["content"]
+        return "Let's sit with that for a moment.", model
+
+    monkeypatch.setattr(main, "call_openrouter", fake_call_openrouter)
+
+    response = client.post(
+        "/api/ai/mental-model/node-chat",
+        headers=headers,
+        json={
+            "node_label": "Avoidance",
+            "node_type": "pattern",
+            "node_description": "Tends to delay difficult conversations.",
+            "evidence_ids": [],
+            "messages": [{"role": "user", "content": "Why do I keep doing this?"}],
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["reply"] == "Let's sit with that for a moment."
+    session_id = data["session_id"]
+
+    # It should show up in chat history like any other session.
+    sessions = client.get("/api/chat/sessions", headers=headers).json()["sessions"]
+    assert any(s["session_id"] == session_id for s in sessions)
 
 
 def test_auth_endpoints_are_rate_limited(client):
