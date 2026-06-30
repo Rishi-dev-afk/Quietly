@@ -1973,7 +1973,7 @@ export default function HomePage() {
           </div>
         )}
 
-        {mentalModel && !isMentalModelLoading && (() => {
+        {activeView === 'mentalmodel' && mentalModel && !isMentalModelLoading && (() => {
           // When scrubbing the time-lapse slider, show that historical snapshot instead of the
           // latest build — but keep the "rebuild" banner and button tied to the real latest state.
           const displayedSnapshot = viewedHistoryIndex !== null ? mentalModelHistory[viewedHistoryIndex] : mentalModel;
