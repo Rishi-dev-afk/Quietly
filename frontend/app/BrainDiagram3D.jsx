@@ -202,7 +202,18 @@ function makeBlobGeometry(radius, seed) {
 export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNodeId }) {
   const mountRef = useRef(null);
   const [tooltip, setTooltip] = useState(null); // { node, screenX, screenY }
+  const [canvasHeight, setCanvasHeight] = useState(560);
   const stateRef = useRef({});
+
+  useEffect(() => {
+    const updateHeight = () => {
+      const w = window.innerWidth;
+      setCanvasHeight(w < 480 ? 320 : w < 760 ? 380 : 560);
+    };
+    updateHeight();
+    window.addEventListener('resize', updateHeight);
+    return () => window.removeEventListener('resize', updateHeight);
+  }, []);
 
   useEffect(() => {
     if (!mountRef.current || !nodes.length) return;
@@ -216,20 +227,25 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
     scene.fog = new THREE.FogExp2(0x0e0e14, 0.0019);
 
     const camera = new THREE.PerspectiveCamera(50, width / height, 1, 2000);
-    camera.position.set(0, 30, 420);
+    // Narrow / short viewports (phones) need the camera pulled back further so the
+    // full diagram stays in frame instead of nodes spilling off the edges.
+    const aspect = width / height;
+    const baseDistance = aspect < 0.85 ? 560 : aspect < 1.2 ? 460 : 420;
+    camera.position.set(0, 30, baseDistance);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.domElement.style.touchAction = 'none';
     mount.innerHTML = '';
     mount.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    controls.minDistance = 120;
-    controls.maxDistance = 900;
+    controls.minDistance = baseDistance * 0.3;
+    controls.maxDistance = baseDistance * 2.1;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.35;
 
@@ -402,6 +418,36 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
     renderer.domElement.addEventListener('click', onClick);
     renderer.domElement.addEventListener('pointerleave', () => setTooltip(null));
 
+    // Touch devices rarely fire pointermove without a drag, so a quick tap needs its own
+    // path to show the tooltip — but only if it was a genuine tap, not the start of a
+    // one-finger rotate drag (which OrbitControls also listens for on the same element).
+    let touchStart = null;
+    function onPointerDown(e) {
+      if (e.pointerType !== 'touch') return;
+      touchStart = { x: e.clientX, y: e.clientY, time: performance.now() };
+    }
+    function onPointerUp(e) {
+      if (e.pointerType !== 'touch' || !touchStart) return;
+      const moved = Math.hypot(e.clientX - touchStart.x, e.clientY - touchStart.y);
+      const elapsedMs = performance.now() - touchStart.time;
+      touchStart = null;
+      if (moved > 8 || elapsedMs > 500) return; // was a drag/rotate, not a tap
+      const hit = pickNode(e.clientX, e.clientY);
+      if (hit) {
+        const screenPos = hit.mesh.position.clone().project(camera);
+        const rect = renderer.domElement.getBoundingClientRect();
+        setTooltip({
+          node: hit.node,
+          x: ((screenPos.x + 1) / 2) * rect.width,
+          y: ((1 - screenPos.y) / 2) * rect.height,
+        });
+      } else {
+        setTooltip(null);
+      }
+    }
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    renderer.domElement.addEventListener('pointerup', onPointerUp);
+
     // ── Resize handling ─────────────────────────────────────────────
     function onResize() {
       const w = mount.clientWidth;
@@ -465,6 +511,8 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('click', onClick);
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('pointerup', onPointerUp);
       controls.dispose();
       renderer.dispose();
       scene.traverse((obj) => {
@@ -479,7 +527,7 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
 
     return () => stateRef.current.cleanup && stateRef.current.cleanup();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, onNodeClick]);
+  }, [nodes, edges, onNodeClick, canvasHeight]);
 
   // Keep the selection ring in sync without re-running the whole effect
   useEffect(() => {
@@ -492,7 +540,7 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
     <div style={{ position: 'relative', width: '100%' }}>
       <div
         ref={mountRef}
-        style={{ width: '100%', height: 560, borderRadius: 18, overflow: 'hidden', cursor: 'grab' }}
+        style={{ width: '100%', height: canvasHeight, borderRadius: 18, overflow: 'hidden', cursor: 'grab', touchAction: 'none' }}
         aria-label="Mental model brain diagram (3D, drag to rotate, scroll to zoom)"
       />
 
@@ -500,14 +548,14 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
         <div
           style={{
             position: 'absolute',
-            left: tooltip.x,
+            left: `clamp(8px, ${tooltip.x}px, calc(100% - 8px))`,
             top: tooltip.y,
             transform: 'translate(-50%, -122%)',
             background: 'rgba(18,19,25,0.96)',
             color: '#EAEAEF',
             borderRadius: 10,
             padding: '11px 15px',
-            maxWidth: 230,
+            maxWidth: 'min(230px, 78vw)',
             fontSize: 12.5,
             lineHeight: 1.5,
             pointerEvents: 'none',
