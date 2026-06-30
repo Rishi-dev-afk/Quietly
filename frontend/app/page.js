@@ -220,12 +220,12 @@ function ReflectionCard({ state }) {
 // ─── Mental Model Brain Diagram ─────────────────────────────────────────────────
 
 const NODE_TYPE_COLORS = {
-  emotion:      { fill: '#C9A893', stroke: '#A8765E', text: '#2B2A33' },
-  theme:        { fill: '#8A9298', stroke: '#5B6B73', text: '#FFFFFF' },
-  pattern:      { fill: '#EFEBE2', stroke: '#C7BFAC', text: '#2B2A33' },
-  coping:       { fill: '#B8D4C8', stroke: '#7AA898', text: '#2B2A33' },
-  relationship: { fill: '#C4B8D4', stroke: '#8A7AA8', text: '#2B2A33' },
-  tension:      { fill: '#D4B8B8', stroke: '#A87A7A', text: '#2B2A33' },
+  emotion:      { fill: '#C9A893', deep: '#8F5E45', stroke: '#A8765E', text: '#2B2A33' },
+  theme:        { fill: '#8A9298', deep: '#4A555C', stroke: '#5B6B73', text: '#FFFFFF' },
+  pattern:      { fill: '#EFEBE2', deep: '#C7BFAC', stroke: '#B5AC95', text: '#2B2A33' },
+  coping:       { fill: '#B8D4C8', deep: '#5C8E78', stroke: '#7AA898', text: '#2B2A33' },
+  relationship: { fill: '#C4B8D4', deep: '#6D5990', stroke: '#8A7AA8', text: '#2B2A33' },
+  tension:      { fill: '#D4B8B8', deep: '#9C5959', stroke: '#A87A7A', text: '#2B2A33' },
 };
 const EDGE_COLORS = {
   fuels:         '#A8765E',
@@ -236,95 +236,207 @@ const EDGE_COLORS = {
   orbits:        '#C7BFAC',
 };
 
+const DIAGRAM_W = 920;
+const DIAGRAM_H = 560;
+
+function nodeRadius(weight) {
+  return 19 + weight * 3.6;
+}
+
+// Lightweight force simulation — no dependencies. Runs synchronously to a
+// settled layout (connected nodes pulled together, others repelled apart,
+// everything gently bound to the canvas).
+function simulateLayout(nodes, edges) {
+  const cx = DIAGRAM_W / 2, cy = DIAGRAM_H / 2;
+  const ids = nodes.map((n) => n.id);
+  const idx = {};
+  ids.forEach((id, i) => (idx[id] = i));
+
+  const sorted = [...nodes].sort((a, b) => b.weight - a.weight);
+  const pos = nodes.map(() => ({ x: cx, y: cy }));
+  sorted.forEach((node, i) => {
+    const angle = i * 2.4;
+    const r = i === 0 ? 0 : 60 + i * 26;
+    pos[idx[node.id]] = { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+  });
+
+  const vel = nodes.map(() => ({ x: 0, y: 0 }));
+  const links = edges
+    .map((e) => ({ a: idx[e.source], b: idx[e.target], strength: e.strength || 1 }))
+    .filter((l) => l.a !== undefined && l.b !== undefined);
+
+  const n = nodes.length;
+  const radii = nodes.map((node) => nodeRadius(node.weight));
+
+  for (let tick = 0; tick < 260; tick++) {
+    const damping = 0.86;
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = pos[i].x - pos[j].x;
+        let dy = pos[i].y - pos[j].y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const minDist = radii[i] + radii[j] + 26;
+        const force = dist < minDist ? (minDist - dist) * 0.06 : 900 / (dist * dist);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        vel[i].x += fx; vel[i].y += fy;
+        vel[j].x -= fx; vel[j].y -= fy;
+      }
+    }
+
+    links.forEach(({ a, b, strength }) => {
+      const dx = pos[b].x - pos[a].x;
+      const dy = pos[b].y - pos[a].y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const targetLen = 120 - strength * 6;
+      const force = (dist - targetLen) * 0.02 * (0.4 + strength * 0.15);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      vel[a].x += fx; vel[a].y += fy;
+      vel[b].x -= fx; vel[b].y -= fy;
+    });
+
+    for (let i = 0; i < n; i++) {
+      const pull = 0.012 + (1 - nodes[i].weight / 10) * 0.006;
+      vel[i].x += (cx - pos[i].x) * pull;
+      vel[i].y += (cy - pos[i].y) * pull;
+    }
+
+    for (let i = 0; i < n; i++) {
+      vel[i].x *= damping;
+      vel[i].y *= damping;
+      pos[i].x += vel[i].x;
+      pos[i].y += vel[i].y;
+      const margin = radii[i] + 24;
+      pos[i].x = Math.max(margin, Math.min(DIAGRAM_W - margin, pos[i].x));
+      pos[i].y = Math.max(margin, Math.min(DIAGRAM_H - margin, pos[i].y));
+    }
+  }
+
+  const result = {};
+  nodes.forEach((node, i) => (result[node.id] = pos[i]));
+  return result;
+}
+
+// Wraps a label across up to 2 lines so it fits inside its circle.
+function wrapLabel(label, maxChars) {
+  const words = label.split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+    if (lines.length === 1) break;
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 2);
+}
+
 function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
-  const svgRef = useRef(null);
   const [tooltip, setTooltip] = useState(null);
   const [positions, setPositions] = useState({});
+  const [drawn, setDrawn] = useState(false);
 
   useEffect(() => {
     if (!nodes.length) return;
-    const cx = 460, cy = 280;
-    const sorted = [...nodes].sort((a, b) => b.weight - a.weight);
-    const pos = {};
-
-    pos[sorted[0].id] = { x: cx, y: cy };
-
-    const ring1 = sorted.slice(1, 5);
-    const ring2 = sorted.slice(5);
-
-    ring1.forEach((node, i) => {
-      const angle = (i / ring1.length) * 2 * Math.PI - Math.PI / 2;
-      const r = 140 + Math.random() * 30;
-      pos[node.id] = {
-        x: cx + r * Math.cos(angle) + (Math.random() - 0.5) * 20,
-        y: cy + r * Math.sin(angle) + (Math.random() - 0.5) * 20,
-      };
-    });
-
-    ring2.forEach((node, i) => {
-      const angle = (i / Math.max(ring2.length, 1)) * 2 * Math.PI - Math.PI / 4;
-      const r = 230 + Math.random() * 40;
-      pos[node.id] = {
-        x: cx + r * Math.cos(angle) + (Math.random() - 0.5) * 30,
-        y: cy + r * Math.sin(angle) + (Math.random() - 0.5) * 30,
-      };
-    });
-
-    setPositions(pos);
-  }, [nodes]);
+    setDrawn(false);
+    setPositions(simulateLayout(nodes, edges));
+    const t = setTimeout(() => setDrawn(true), 40);
+    return () => clearTimeout(t);
+  }, [nodes, edges]);
 
   if (!nodes.length || !Object.keys(positions).length) return null;
 
-  const nodeRadius = (weight) => 18 + weight * 3.5;
-
   return (
     <div style={{ position: 'relative', width: '100%' }}>
+      <style>{`
+        @keyframes mm-draw-edge { to { stroke-dashoffset: 0; } }
+        @keyframes mm-fade-in { from { opacity: 0; transform: scale(0.85); } to { opacity: 1; transform: scale(1); } }
+        @keyframes mm-pulse-ring { 0% { opacity: 0.55; r: var(--r0); } 100% { opacity: 0; r: var(--r1); } }
+        .mm-node-group { transition: filter 0.15s ease; }
+        .mm-node-group:hover { filter: brightness(1.04); }
+      `}</style>
       <svg
-        ref={svgRef}
-        viewBox="0 0 920 560"
+        viewBox={`0 0 ${DIAGRAM_W} ${DIAGRAM_H}`}
         xmlns="http://www.w3.org/2000/svg"
         style={{ width: '100%', display: 'block', overflow: 'visible' }}
         aria-label="Mental model brain diagram"
       >
-        <ellipse cx="460" cy="280" rx="380" ry="240" fill="#F6F4F0" stroke="#D8D2C4" strokeWidth="1" strokeDasharray="3 5" opacity="0.6" />
-        <ellipse cx="370" cy="200" rx="160" ry="120" fill="none" stroke="#EFEBE2" strokeWidth="1" opacity="0.5" />
-        <ellipse cx="560" cy="350" rx="140" ry="110" fill="none" stroke="#EFEBE2" strokeWidth="1" opacity="0.5" />
+        <defs>
+          <radialGradient id="mm-bg-glow" cx="50%" cy="42%" r="65%">
+            <stop offset="0%" stopColor="#FBFAF7" />
+            <stop offset="55%" stopColor="#F6F4F0" />
+            <stop offset="100%" stopColor="#EEEAE0" />
+          </radialGradient>
+          <filter id="mm-node-shadow" x="-60%" y="-60%" width="220%" height="220%">
+            <feDropShadow dx="0" dy="2.5" stdDeviation="3.5" floodColor="#2B2A33" floodOpacity="0.22" />
+          </filter>
+          {Object.entries(NODE_TYPE_COLORS).map(([type, c]) => (
+            <radialGradient key={type} id={`mm-grad-${type}`} cx="38%" cy="32%" r="75%">
+              <stop offset="0%" stopColor={c.fill} stopOpacity="1" />
+              <stop offset="65%" stopColor={c.fill} />
+              <stop offset="100%" stopColor={c.deep} />
+            </radialGradient>
+          ))}
+        </defs>
+
+        <rect x="0" y="0" width={DIAGRAM_W} height={DIAGRAM_H} fill="url(#mm-bg-glow)" rx="18" />
 
         {edges.map((edge, i) => {
           const s = positions[edge.source];
           const t = positions[edge.target];
           if (!s || !t) return null;
           const color = EDGE_COLORS[edge.relationship] || '#D8D2C4';
-          const strokeW = 0.8 + edge.strength * 0.4;
-          const mx = (s.x + t.x) / 2 + (t.y - s.y) * 0.15;
-          const my = (s.y + t.y) / 2 - (t.x - s.x) * 0.15;
+          const strokeW = 0.9 + edge.strength * 0.45;
+          const mx = (s.x + t.x) / 2 + (t.y - s.y) * 0.16;
+          const my = (s.y + t.y) / 2 - (t.x - s.x) * 0.16;
+          const len = Math.hypot(t.x - s.x, t.y - s.y) * 1.25 + 40;
           return (
-            <g key={i}>
-              <path
-                d={`M${s.x},${s.y} Q${mx},${my} ${t.x},${t.y}`}
-                fill="none"
-                stroke={color}
-                strokeWidth={strokeW}
-                strokeLinecap="round"
-                opacity="0.55"
-              />
-            </g>
+            <path
+              key={i}
+              d={`M${s.x},${s.y} Q${mx},${my} ${t.x},${t.y}`}
+              fill="none"
+              stroke={color}
+              strokeWidth={strokeW}
+              strokeLinecap="round"
+              opacity={drawn ? 0.5 : 0}
+              strokeDasharray={drawn ? 'none' : len}
+              strokeDashoffset={drawn ? 0 : len}
+              style={{
+                transition: 'opacity 0.6s ease',
+                animation: drawn ? `mm-draw-edge 0.9s ease ${0.15 + i * 0.025}s forwards` : 'none',
+              }}
+            />
           );
         })}
 
-        {nodes.map((node) => {
+        {nodes.map((node, ni) => {
           const pos = positions[node.id];
           if (!pos) return null;
           const colors = NODE_TYPE_COLORS[node.type] || NODE_TYPE_COLORS.theme;
           const r = nodeRadius(node.weight);
           const isHovered = tooltip?.id === node.id;
           const isSelected = selectedNodeId === node.id;
+          const lines = wrapLabel(node.label, Math.max(7, Math.round(r * 0.42)));
+          const fontSize = Math.max(9, Math.min(12.5, r * 0.36));
+          const lineHeight = fontSize * 1.18;
 
           return (
             <g
               key={node.id}
+              className="mm-node-group"
               transform={`translate(${pos.x}, ${pos.y})`}
-              style={{ cursor: onNodeClick ? 'pointer' : 'default' }}
+              style={{
+                cursor: onNodeClick ? 'pointer' : 'default',
+                opacity: drawn ? 1 : 0,
+                animation: drawn ? `mm-fade-in 0.45s ease ${0.05 + ni * 0.03}s backwards` : 'none',
+              }}
               onMouseEnter={() => setTooltip({ id: node.id, x: pos.x, y: pos.y, node })}
               onMouseLeave={() => setTooltip(null)}
               onClick={() => onNodeClick && onNodeClick(node)}
@@ -334,32 +446,37 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
                 if (onNodeClick && (e.key === 'Enter' || e.key === ' ')) onNodeClick(node);
               }}
             >
-              {isSelected && <circle r={r + 11} fill="none" stroke={colors.stroke} strokeWidth="2" strokeDasharray="3 3" />}
-              {isHovered && <circle r={r + 8} fill={colors.fill} opacity="0.2" />}
-              <circle r={r} fill={colors.fill} stroke={colors.stroke} strokeWidth="1.5" />
-              <foreignObject x={-r} y={-r} width={r * 2} height={r * 2} style={{ overflow: 'visible' }}>
-                <div
-                  xmlns="http://www.w3.org/1999/xhtml"
-                  style={{
-                    width: r * 2,
-                    height: r * 2,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    textAlign: 'center',
-                    padding: '4px',
-                    fontSize: Math.max(9, Math.min(12, r * 0.38)) + 'px',
-                    fontFamily: 'Inter, sans-serif',
-                    fontWeight: 600,
-                    color: colors.text,
-                    lineHeight: 1.2,
-                    userSelect: 'none',
-                    pointerEvents: 'none',
-                  }}
-                >
-                  {node.label}
-                </div>
-              </foreignObject>
+              {isSelected && (
+                <circle
+                  r={r + 9}
+                  fill="none"
+                  stroke={colors.stroke}
+                  strokeWidth="2"
+                  strokeDasharray="2 5"
+                  style={{ animation: 'mm-pulse-ring 2.2s linear infinite', '--r0': `${r + 7}px`, '--r1': `${r + 16}px` }}
+                  opacity="0.7"
+                />
+              )}
+              {isHovered && <circle r={r + 6} fill={colors.stroke} opacity="0.16" />}
+
+              <circle r={r} fill={`url(#mm-grad-${node.type || 'theme'})`} filter="url(#mm-node-shadow)" stroke={colors.stroke} strokeWidth={isSelected ? 2 : 1.25} />
+              <ellipse cx={-r * 0.32} cy={-r * 0.38} rx={r * 0.42} ry={r * 0.28} fill="#FFFFFF" opacity="0.22" />
+
+              <text
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill={colors.text}
+                fontSize={fontSize}
+                fontWeight="600"
+                fontFamily="Inter, sans-serif"
+                style={{ userSelect: 'none', pointerEvents: 'none' }}
+              >
+                {lines.map((line, li) => (
+                  <tspan key={li} x="0" y={(li - (lines.length - 1) / 2) * lineHeight}>
+                    {line}
+                  </tspan>
+                ))}
+              </text>
             </g>
           );
         })}
@@ -369,23 +486,26 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
         <div
           style={{
             position: 'absolute',
-            left: `${(tooltip.x / 920) * 100}%`,
-            top: `${(tooltip.y / 560) * 100}%`,
-            transform: 'translate(-50%, -120%)',
+            left: `${Math.min(86, Math.max(14, (tooltip.x / DIAGRAM_W) * 100))}%`,
+            top: `${Math.min(88, Math.max(8, (tooltip.y / DIAGRAM_H) * 100))}%`,
+            transform: 'translate(-50%, -122%)',
             background: '#2B2A33',
             color: '#F6F4F0',
-            borderRadius: 10,
-            padding: '10px 14px',
-            maxWidth: 220,
+            borderRadius: 12,
+            padding: '11px 15px',
+            maxWidth: 230,
             fontSize: 12.5,
             lineHeight: 1.5,
             pointerEvents: 'none',
             zIndex: 10,
-            boxShadow: '0 4px 16px rgba(0,0,0,0.2)',
+            boxShadow: '0 10px 28px rgba(0,0,0,0.28)',
+            border: '1px solid rgba(255,255,255,0.08)',
           }}
         >
           <div style={{ fontWeight: 700, marginBottom: 4, fontSize: 13 }}>{tooltip.node.label}</div>
-          <div style={{ opacity: 0.7, fontSize: 11, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{tooltip.node.type} · weight {tooltip.node.weight}/10</div>
+          <div style={{ opacity: 0.65, fontSize: 11, marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {tooltip.node.type} · weight {tooltip.node.weight}/10
+          </div>
           <div>{tooltip.node.description}</div>
         </div>
       )}
@@ -393,7 +513,7 @@ function BrainDiagram({ nodes, edges, onNodeClick, selectedNodeId }) {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px', marginTop: 20, paddingTop: 16, borderTop: '1px solid #EFEBE2' }}>
         {Object.entries(NODE_TYPE_COLORS).map(([type, colors]) => (
           <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#5B6B73' }}>
-            <div style={{ width: 10, height: 10, borderRadius: '50%', background: colors.fill, border: `1.5px solid ${colors.stroke}` }} />
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: `linear-gradient(135deg, ${colors.fill}, ${colors.deep})`, border: `1.5px solid ${colors.stroke}` }} />
             <span style={{ textTransform: 'capitalize' }}>{type}</span>
           </div>
         ))}
