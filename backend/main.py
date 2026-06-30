@@ -141,7 +141,8 @@ Analyze the provided content and return ONLY a valid JSON object (no markdown, n
       "label": "short label (2-4 words)",
       "type": "emotion | theme | pattern | coping | relationship | tension",
       "weight": 1-10,
-      "description": "one sentence describing what this node represents in this person's inner world"
+      "description": "one sentence describing what this node represents in this person's inner world",
+      "evidence": ["journal:142", "msg:55"]
     }
   ],
   "edges": [
@@ -157,6 +158,7 @@ Analyze the provided content and return ONLY a valid JSON object (no markdown, n
 
 Guidelines:
 - Extract 6-14 nodes. Each node should be something genuinely present in their writing, not generic.
+- evidence: each piece of content above is tagged with an id like "journal:142" or "msg:55" (the text after the # symbol, e.g. "#journal:142" → cite it as "journal:142"). For every node, list the 1-4 ids that most directly informed it. Only cite ids that actually appear in the content provided — never invent one. If a node draws on the overall pattern rather than one specific moment, cite whichever 1-2 entries best illustrate it.
 - Use their own vocabulary and imagery where possible — if they say 'the fog', use that, not 'depression'.
 - Types: emotion (felt states), theme (recurring subject), pattern (behavioural tendency), coping (what they reach for), relationship (key people/dynamics), tension (unresolved conflicts or contradictions).
 - Edges should reflect real relationships you observe between nodes, not assumed ones.
@@ -376,6 +378,63 @@ class MentalModelStatusResponse(BaseModel):
     last_entry_count: int | None = None
 
 
+# ─── Time-lapse (mental model history) ──────────────────────────────────────────
+
+class MentalModelHistoryItem(BaseModel):
+    id: int
+    nodes: list[dict]
+    edges: list[dict]
+    summary: str
+    model: str
+    created_at: datetime
+    entry_count_at_build: int | None = None
+
+
+class MentalModelHistoryResponse(BaseModel):
+    snapshots: list[MentalModelHistoryItem]
+
+
+# ─── Evidence (node provenance) ─────────────────────────────────────────────────
+
+class EvidenceRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class EvidenceItem(BaseModel):
+    id: str
+    type: str  # "journal" | "msg"
+    content: str
+    created_at: datetime | None = None
+    mood: int | None = None
+
+
+class EvidenceResponse(BaseModel):
+    items: list[EvidenceItem]
+
+
+# ─── Node-scoped chat ────────────────────────────────────────────────────────────
+
+class NodeChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class NodeChatRequest(BaseModel):
+    node_label: str = Field(min_length=1, max_length=200)
+    node_type: str | None = None
+    node_description: str | None = Field(default=None, max_length=1000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=10)
+    messages: list[NodeChatMessage]
+    session_id: str | None = None
+    model: str | None = None
+
+
+class NodeChatResponse(BaseModel):
+    reply: str
+    model: str
+    session_id: str
+
+
 class PsychProfileRequest(BaseModel):
     model: str | None = None
 
@@ -554,6 +613,9 @@ async def call_openrouter(messages: list[dict], model: str, timeout: int = 60) -
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 CurrentUserOptional = Annotated[User | None, Depends(get_current_user_optional)]
+
+# Matches the evidence tags emitted by the mental-model prompt, e.g. "journal:142" or "msg:55".
+EVIDENCE_ID_RE = re.compile(r"^(journal|msg):(\d+)$")
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
 
@@ -801,7 +863,10 @@ def build_content_digest(current_user: User, db: Session) -> tuple[str, int]:
         date_str = entry.created_at.strftime("%b %d")
         mood_label = {1: "Heavy", 2: "Low", 3: "Steady", 4: "Lighter", 5: "Open"}.get(entry.mood, "Steady")
         truncated = entry.content[:600] + ("…" if len(entry.content) > 600 else "")
-        content_parts.append(f"[Journal, {date_str}, mood: {mood_label}]\n{truncated}")
+        # The "journal:<id>" tag is a stable evidence reference the AI can cite on a node — it's
+        # parsed back out by the evidence endpoint, scoped to this same user, when someone clicks
+        # a node to see what it was actually built from.
+        content_parts.append(f"[Journal #journal:{entry.id}, {date_str}, mood: {mood_label}]\n{truncated}")
 
     if chat_messages:
         sessions: dict[str, list] = {}
@@ -816,7 +881,9 @@ def build_content_digest(current_user: User, db: Session) -> tuple[str, int]:
             for msg in msgs:
                 prefix = "You" if msg.role == "user" else "Quietly"
                 truncated = msg.content[:300] + ("…" if len(msg.content) > 300 else "")
-                lines.append(f"{prefix}: {truncated}")
+                # Same idea as journal entries — "msg:<id>" lets a node cite the exact chat line
+                # that informed it.
+                lines.append(f"{prefix} (#msg:{msg.id}): {truncated}")
             content_parts.append("\n".join(lines))
 
     digest = "\n\n---\n\n".join(content_parts)
@@ -963,6 +1030,33 @@ def get_latest_mental_model(current_user: CurrentUser, db: Session = Depends(get
     )
 
 
+@app.get("/api/ai/mental-model/history", response_model=MentalModelHistoryResponse)
+def get_mental_model_history(current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Returns every mental model snapshot ever built for this user, oldest first. Powers the
+    time-lapse view — scrubbing through past snapshots to watch the graph evolve — rather than
+    only ever seeing the latest build."""
+    snapshots = (
+        db.query(MentalModelSnapshot)
+        .filter(MentalModelSnapshot.user_id == current_user.id)
+        .order_by(MentalModelSnapshot.created_at.asc())
+        .all()
+    )
+    return MentalModelHistoryResponse(
+        snapshots=[
+            MentalModelHistoryItem(
+                id=s.id,
+                nodes=json.loads(s.nodes_json),
+                edges=json.loads(s.edges_json),
+                summary=s.summary,
+                model=s.model or OPENROUTER_DEFAULT_MODEL,
+                created_at=s.created_at,
+                entry_count_at_build=s.entry_count_at_build,
+            )
+            for s in snapshots
+        ]
+    )
+
+
 # AI — Psychological Profile
 
 @app.get("/api/ai/psych-profile/status", response_model=PsychProfileStatusResponse)
@@ -1066,3 +1160,88 @@ def get_latest_psych_profile(current_user: CurrentUser, db: Session = Depends(ge
         created_at=latest.created_at,
         entry_count_at_build=latest.entry_count_at_build,
     )
+
+
+# AI — Evidence (node provenance)
+
+@app.post("/api/ai/evidence", response_model=EvidenceResponse)
+def get_evidence(payload: EvidenceRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """Resolves the evidence tags a mental-model node cites (e.g. 'journal:142', 'msg:55') back to
+    the actual journal entry or chat message text. Strictly scoped to the current user — an id that
+    doesn't parse, or that belongs to someone else's content, is silently skipped rather than erroring,
+    since a node's evidence list is best-effort AI output, not a guaranteed-valid reference."""
+    items: list[EvidenceItem] = []
+    for raw_id in payload.ids[:20]:
+        match = EVIDENCE_ID_RE.match(raw_id.strip())
+        if not match:
+            continue
+        kind, numeric_id = match.group(1), int(match.group(2))
+        if kind == "journal":
+            entry = (
+                db.query(JournalEntry)
+                .filter(JournalEntry.id == numeric_id, JournalEntry.user_id == current_user.id)
+                .first()
+            )
+            if entry:
+                items.append(
+                    EvidenceItem(id=raw_id, type="journal", content=entry.content, created_at=entry.created_at, mood=entry.mood)
+                )
+        else:
+            message = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.id == numeric_id, ChatMessage.user_id == current_user.id)
+                .first()
+            )
+            if message:
+                items.append(EvidenceItem(id=raw_id, type="msg", content=message.content, created_at=message.created_at))
+    return EvidenceResponse(items=items)
+
+
+# AI — Node-scoped chat
+
+@app.post("/api/ai/mental-model/node-chat", response_model=NodeChatResponse)
+async def node_chat(payload: NodeChatRequest, current_user: CurrentUser, db: Session = Depends(get_db)):
+    """A chat scoped to a single mental-model node — e.g. clicking the tension node 'wanting
+    connection vs. fear of being seen' and talking it through directly, instead of starting a
+    conversation from a blank page. Grounded with the actual journal/chat excerpts that produced
+    the node, when evidence ids are provided, so the AI isn't reasoning from the label alone.
+    Persists into the same chat_messages/session_id model as regular chat, so these conversations
+    show up in chat history like any other."""
+    if not payload.messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
+
+    evidence_text = ""
+    if payload.evidence_ids:
+        evidence_items = get_evidence(EvidenceRequest(ids=payload.evidence_ids), current_user, db).items
+        if evidence_items:
+            evidence_lines = [f"- {item.content[:400]}" for item in evidence_items]
+            evidence_text = "\n\nHere is what they actually wrote that this pattern is drawn from:\n" + "\n".join(evidence_lines)
+
+    node_context = (
+        f"\n\nFor this conversation, you are specifically helping the person go deeper on one pattern "
+        f"from their mental model, titled \"{payload.node_label}\""
+        + (f" ({payload.node_type})" if payload.node_type else "")
+        + (f" — {payload.node_description}" if payload.node_description else "")
+        + evidence_text
+        + "\n\nStay focused on this specific pattern unless they clearly want to talk about something else."
+    )
+
+    session_id = payload.session_id or str(uuid.uuid4())
+    model = payload.model or OPENROUTER_DEFAULT_MODEL
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT + node_context}]
+    for msg in payload.messages:
+        if msg.role not in ("user", "assistant"):
+            raise HTTPException(status_code=400, detail=f"Invalid role: {msg.role}")
+        messages.append({"role": msg.role, "content": msg.content})
+
+    latest_user_msg = next((m for m in reversed(payload.messages) if m.role == "user"), None)
+    if latest_user_msg:
+        db.add(ChatMessage(user_id=current_user.id, session_id=session_id, role="user", content=latest_user_msg.content))
+        db.commit()
+
+    reply, actual_model = await call_openrouter(messages, model)
+
+    db.add(ChatMessage(user_id=current_user.id, session_id=session_id, role="assistant", content=reply))
+    db.commit()
+
+    return NodeChatResponse(reply=reply, model=actual_model, session_id=session_id)
