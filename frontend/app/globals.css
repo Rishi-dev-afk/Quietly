@@ -929,6 +929,19 @@ button:focus-visible, textarea:focus-visible, .chip:focus-visible{
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* These cards are now buttons (clicking opens the provenance/chat panel), so reset native
+     button chrome and keep text left-aligned like the rest of the card grid. */
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.mental-model-node-card:hover {
+  border-color: var(--clay-soft);
+}
+.mental-model-node-card.is-selected {
+  border-color: var(--clay);
+  box-shadow: 0 0 0 1px var(--clay);
 }
 .mental-model-node-header {
   display: flex;
@@ -953,6 +966,181 @@ button:focus-visible, textarea:focus-visible, .chip:focus-visible{
   color: var(--ink-soft);
   line-height: 1.55;
   margin: 0;
+}
+
+/* ── Time-lapse scrubber ───────────────────────────────────────────────── */
+.mental-model-timelapse {
+  background: var(--paper-low);
+  border: 1px solid var(--dune);
+  border-radius: var(--radius-m);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mental-model-timelapse-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.mental-model-timelapse-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--slate);
+  font-family: var(--font-mono);
+}
+.mental-model-timelapse-date {
+  font-size: 12.5px;
+  color: var(--clay);
+  font-weight: 600;
+}
+.mental-model-timelapse-slider {
+  width: 100%;
+  accent-color: var(--clay);
+  cursor: pointer;
+}
+.mental-model-timelapse-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--slate-soft);
+}
+
+.mental-model-diagram-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--slate-soft);
+  text-align: center;
+}
+
+/* ── Node provenance + node-scoped chat panel ─────────────────────────── */
+.mental-model-node-panel {
+  background: var(--white);
+  border: 1px solid var(--clay-soft);
+  border-radius: var(--radius-l);
+  padding: 20px 22px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.mental-model-node-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.mental-model-node-panel-label {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-right: 10px;
+}
+
+.mental-model-evidence-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+}
+.mental-model-evidence-loading {
+  font-size: 13px;
+  color: var(--slate-soft);
+  font-style: italic;
+  margin: 0;
+}
+.mental-model-evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mental-model-evidence-item {
+  background: var(--paper-low);
+  border: 1px solid var(--dune);
+  border-radius: var(--radius-s);
+  padding: 10px 12px;
+}
+.mental-model-evidence-meta {
+  display: block;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--slate-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.mental-model-evidence-item p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.55;
+  font-style: italic;
+}
+
+.mental-model-node-chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.mental-model-node-chat-msg {
+  font-size: 13.5px;
+  line-height: 1.55;
+  padding: 9px 13px;
+  border-radius: var(--radius-m);
+  max-width: 85%;
+}
+.mental-model-node-chat-msg.user {
+  align-self: flex-end;
+  background: var(--ink);
+  color: var(--paper);
+}
+.mental-model-node-chat-msg.assistant {
+  align-self: flex-start;
+  background: var(--paper-low);
+  border: 1px solid var(--dune);
+  color: var(--ink-soft);
+}
+.mental-model-node-chat-msg.is-error {
+  border-color: #A8765E;
+  color: #8C4A3A;
+}
+.mental-model-node-chat-msg.is-loading {
+  font-style: italic;
+  color: var(--slate-soft);
+}
+.mental-model-node-chat-form {
+  display: flex;
+  gap: 8px;
+}
+.mental-model-node-chat-form input {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid var(--dune-strong);
+  border-radius: 999px;
+  font-size: 13.5px;
+  background: var(--paper-low);
+  color: var(--ink);
+}
+.mental-model-node-chat-form input:focus {
+  outline: none;
+  border-color: var(--clay);
+}
+
+@media (max-width: 760px) {
+  .mental-model-timelapse-header{ flex-direction: column; align-items: flex-start; gap: 4px; }
+  .mental-model-node-chat-msg{ max-width: 95%; }
 }
 
 /* ── Psychological Profile view ─────────────────────────────────────── */
