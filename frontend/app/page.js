@@ -129,6 +129,8 @@ function mapChatSession(session) {
   return {
     ...session,
     started_at: new Date(normalized),
+    session_type: session.session_type || null,
+    node_label: session.node_label || null,
   };
 }
 
@@ -1590,7 +1592,12 @@ export default function HomePage() {
                       </div>
                       <div className="entry-body">
                         <p className="entry-snippet">{session.preview || 'No preview available'}</p>
-                        <span className="entry-meta">{session.message_count} messages</span>
+                        <span className="entry-meta">
+                          {session.session_type === 'node_chat' && session.node_label && (
+                            <span className="session-node-badge">⬡ {session.node_label}</span>
+                          )}
+                          {session.message_count} messages
+                        </span>
                       </div>
                       <div className="entry-save">
                         {loadingSessionId === session.session_id ? 'Loading…' : '→'}
