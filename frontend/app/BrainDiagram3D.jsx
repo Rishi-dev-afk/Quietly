@@ -461,7 +461,7 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
 
     // ── Animation loop ──────────────────────────────────────────────
     const clock = new THREE.Clock();
-    let rafId;
+    let rafId = null;
 
     function animate() {
       rafId = requestAnimationFrame(animate);
@@ -504,10 +504,47 @@ export default function BrainDiagram3D({ nodes, edges, onNodeClick, selectedNode
     const selectedIdRef = { current: selectedNodeId };
     stateRef.current.setSelected = (id) => { selectedIdRef.current = id; };
 
-    animate();
+    function startLoop() {
+      if (rafId !== null) return; // already running
+      clock.start();
+      animate();
+    }
+    function stopLoop() {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+
+    // Stop entirely (no rAF callbacks at all) when the canvas scrolls/tabs out of view —
+    // this is what actually frees up the main thread for things like typing elsewhere on
+    // the page, since a skipped-render rAF loop still wakes up every frame for nothing.
+    const visibilityObserver = new IntersectionObserver(
+      (entries) => {
+        const visible = entries[0]?.isIntersecting;
+        if (visible && document.visibilityState === 'visible') startLoop();
+        else stopLoop();
+      },
+      { threshold: 0.01 }
+    );
+    visibilityObserver.observe(mount);
+
+    function onDocVisibilityChange() {
+      if (document.visibilityState !== 'visible') {
+        stopLoop();
+      } else {
+        // Re-check actual on-screen visibility before resuming
+        const rect = mount.getBoundingClientRect();
+        const onScreen = rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0 && rect.height > 0;
+        if (onScreen) startLoop();
+      }
+    }
+    document.addEventListener('visibilitychange', onDocVisibilityChange);
+
+    startLoop();
 
     stateRef.current.cleanup = () => {
-      cancelAnimationFrame(rafId);
+      stopLoop();
+      visibilityObserver.disconnect();
+      document.removeEventListener('visibilitychange', onDocVisibilityChange);
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('click', onClick);
