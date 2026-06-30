@@ -302,6 +302,26 @@ button:focus-visible, textarea:focus-visible, .chip:focus-visible{
 .session-delete-btn.is-armed{ background:rgba(168,118,94,0.16); color:#8C4A3A; }
 .session-delete-btn:disabled{ opacity:0.5; cursor:not-allowed; }
 
+/* Badge shown on node-scoped chat sessions in the history list */
+.session-node-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--clay);
+  background: rgba(168, 118, 94, 0.10);
+  border: 1px solid rgba(168, 118, 94, 0.22);
+  border-radius: 20px;
+  padding: 1px 7px;
+  margin-right: 6px;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
 .reflect-card{ margin-top:14px; max-width:640px; background:var(--paper-low); border:1px solid var(--dune); border-radius:var(--radius-m); padding:16px 18px; display:flex; gap:11px; align-items:flex-start; }
 .reflect-card-icon{ width:18px; height:18px; color:var(--clay); flex-shrink:0; margin-top:2px; }
 .reflect-card-body{ min-width:0; }
