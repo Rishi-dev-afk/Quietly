@@ -51,8 +51,8 @@ No social features. No streaks. No gamification. Just a place to write — and, 
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/your-username/NeuroTwin.git
-cd NeuroTwin
+git clone https://github.com/Rishi-dev-afk/Quietly.git
+cd Quietly
 ```
 
 ### 2. Set up the backend
@@ -173,7 +173,7 @@ ANALYSIS_REFRESH_EVERY_N_ENTRIES = 5
 ## Project structure
 
 ```
-NeuroTwin/
+Quietly/
 ├── backend/
 │   ├── main.py              # FastAPI app — all routes, models, AI prompts
 │   ├── requirements.txt
